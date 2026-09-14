@@ -1384,7 +1384,8 @@ float GetAngle(const cv::Vec3f &v1, const cv::Vec3f &v2)
 }
 
 // ETH version
-void RunFusion(const path &dense_folder, const std::vector<Problem> &problems, const StateStore *state_store)
+void RunFusion(const path &dense_folder, const path &output_folder,
+	const std::vector<Problem> &problems, const StateStore *state_store)
 {
 	int num_images = problems.size();
 	path image_folder = dense_folder / path("images");
@@ -1540,7 +1541,7 @@ void RunFusion(const path &dense_folder, const std::vector<Problem> &problems, c
 		}
 		PrintProgressBar("fusion build point cloud", i + 1, num_images);
 	}
-	path ply_path = dense_folder / path("DPE") / path("DPE.ply");
+	path ply_path = output_folder / path("DPE.ply");
 	ExportPointCloud(ply_path, PointCloud);
 	std::cout << "[DPE Progress] fusion done; point cloud saved to " << ply_path.string()
 		<< " with " << PointCloud.size() << " points" << std::endl;

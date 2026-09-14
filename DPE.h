@@ -92,7 +92,8 @@ private:
 	size_t reserved_bytes_;
 };
 
-void RunFusion(const path &dense_folder, const std::vector<Problem> &problems, const StateStore *state_store = nullptr);
+void RunFusion(const path &dense_folder, const path &output_folder,
+	const std::vector<Problem> &problems, const StateStore *state_store = nullptr);
 void RunFusion_TAT_Intermediate(const path &dense_folder, const std::vector<Problem> &problems);
 void RunFusion_TAT_advanced(const path &dense_folder, const std::vector<Problem> &problems);
 

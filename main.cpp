@@ -11,6 +11,7 @@ struct RuntimeOptions {
 	VisMode vis_mode = VisMode::NONE;
 	CheckpointMode checkpoint_mode = CheckpointMode::FINAL;
 	bool profile = true;
+	path output_folder;
 };
 
 struct ProfileStats {
@@ -68,6 +69,13 @@ static RuntimeOptions ParseOptions(int argc, char **argv) {
 		} else if (arg.rfind("--profile=", 0) == 0) {
 			std::string value = arg.substr(10);
 			options.profile = value != "off" && value != "0";
+		} else if (arg.rfind("--output=", 0) == 0) {
+			std::string value = arg.substr(9);
+			if (value.empty()) throw std::runtime_error("--output requires a non-empty path");
+			options.output_folder = path(value);
+		} else if (arg == "--output") {
+			if (i + 1 >= argc) throw std::runtime_error("--output requires a path");
+			options.output_folder = path(argv[++i]);
 		} else if (!gpu_set && !arg.empty() && arg[0] != '-') {
 			options.gpu_index = std::atoi(arg.c_str());
 			gpu_set = true;
@@ -91,7 +99,7 @@ static void PrintProgressBar(const std::string &label, const int completed, cons
 		<< "% (" << completed << "/" << total << ")" << std::defaultfloat << std::setfill(' ') << std::endl;
 }
 
-void GenerateSampleList(const path &dense_folder, std::vector<Problem> &problems)
+void GenerateSampleList(const path &dense_folder, const path &output_folder, std::vector<Problem> &problems)
 {
 	path cluster_list_path = dense_folder / path("pair.txt");
 	problems.clear();
@@ -115,8 +123,8 @@ void GenerateSampleList(const path &dense_folder, std::vector<Problem> &problems
 		iss >> problem.ref_image_id;
 
 		problem.dense_folder = dense_folder;
-		problem.result_folder = dense_folder / path(OUT_NAME) / path(ToFormatIndex(problem.ref_image_id));
-		create_directory(problem.result_folder);
+		problem.result_folder = output_folder / path("views") / path(ToFormatIndex(problem.ref_image_id));
+		create_directories(problem.result_folder);
 
 		int num_src_images;
 		iss.clear();
@@ -312,7 +320,7 @@ void ProcessProblem(const Problem &problem, SceneCache &scene_cache, StateStore 
 
 int main(int argc, char **argv) {
 	if (argc < 2) {
-		std::cerr << "USAGE: DPE dense_folder [gpu_index] [--vis=none|final|all] "
+		std::cerr << "USAGE: DPE input_folder [gpu_index] [--output=output_folder] [--vis=none|final|all] "
 			<< "[--checkpoint=none|final|all] [--profile=on|off]\n";
 		return EXIT_FAILURE;
 	}
@@ -324,10 +332,18 @@ int main(int argc, char **argv) {
 		return EXIT_FAILURE;
 	}
 	path dense_folder(argv[1]);
-	path output_folder = dense_folder / path(OUT_NAME);
-	create_directory(output_folder);
+	path output_folder = options.output_folder.empty() ? dense_folder / path(OUT_NAME) : options.output_folder;
+	if (!exists(dense_folder / path("images")) || !exists(dense_folder / path("cams")) ||
+		!exists(dense_folder / path("pair.txt"))) {
+		std::cerr << "Invalid input folder; expected images/, cams/, and pair.txt under: "
+			<< dense_folder.string() << "\n";
+		return EXIT_FAILURE;
+	}
+	create_directories(output_folder / path("views"));
 	cudaSetDevice(options.gpu_index);
-	std::cout << "Runtime mode: vis="
+	std::cout << "Input folder : " << dense_folder.string() << "\n"
+		<< "Output folder: " << output_folder.string() << "\n"
+		<< "Runtime mode: vis="
 		<< (options.vis_mode == VisMode::NONE ? "none" : options.vis_mode == VisMode::FINAL ? "final" : "all")
 		<< ", checkpoint="
 		<< (options.checkpoint_mode == CheckpointMode::NONE ? "none" : options.checkpoint_mode == CheckpointMode::FINAL ? "final" : "all")
@@ -339,7 +355,7 @@ int main(int argc, char **argv) {
 	ProfileStats profile;
 	// generate problems
 	std::vector<Problem> problems;
-	GenerateSampleList(dense_folder, problems);
+	GenerateSampleList(dense_folder, output_folder, problems);
 	if (!CheckImages(problems, scene_cache)) {
 		std::cerr << "Images may error, check it!\n";
 		return EXIT_FAILURE;
@@ -442,7 +458,7 @@ int main(int argc, char **argv) {
 
 	std::cout << "[DPE Progress] patchmatch done; starting fusion" << std::endl;
 	auto fusion_start = std::chrono::steady_clock::now();
-	RunFusion(dense_folder, problems, &state_store);
+	RunFusion(dense_folder, output_folder, problems, &state_store);
 	profile.fusion_ms += ElapsedMs(fusion_start);
 	if (options.profile) profile.Print(scene_cache.ImageBytes(), gpu_workspace.ReservedBytes());
 	std::cout << "All done\n";

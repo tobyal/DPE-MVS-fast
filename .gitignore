@@ -2,4 +2,6 @@ runs/
 build/
 asset/
 project_data/
+__pycache__/
+*.pyc
 *.md
