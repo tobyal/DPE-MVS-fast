@@ -1,0 +1,1328 @@
+[1mdiff --git a/.gitignore b/.gitignore[m
+[1mindex ba5b60c..384a9f3 100644[m
+[1m--- a/.gitignore[m
+[1m+++ b/.gitignore[m
+[36m@@ -1,4 +1,5 @@[m
+ runs/[m
+ build/[m
+ asset/[m
+[32m+[m[32mproject_data/[m
+ *.md[m
+\ No newline at end of file[m
+[1mdiff --git a/CMakeLists.txt b/CMakeLists.txt[m
+[1mindex 389504d..49c9d45 100644[m
+[1m--- a/CMakeLists.txt[m
+[1m+++ b/CMakeLists.txt[m
+[36m@@ -4,6 +4,9 @@[m [mSET(CMAKE_CXX_COMPILER /usr/bin/g++)[m
+ cmake_minimum_required (VERSION 2.8)[m
+ project (DPE)[m
+ [m
+[32m+[m[32moption(DPE_DEBUG_SYNC "Synchronize after every CUDA kernel launch" OFF)[m
+[32m+[m[32moption(DPE_DEBUG_COMPLEX "Download and save complex.jpg after edge analysis" OFF)[m
+[32m+[m
+ set(Boost_USE_STATIC_LIBS ON)[m
+ set(Boost_USE_MULTITHREADED ON)[m
+ set(Boost_USE_STATIC_RUNTIME OFF)[m
+[36m@@ -22,6 +25,13 @@[m [minclude_directories(.)[m
+ [m
+ set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS};-O3 --use_fast_math --maxrregcount=128 --ptxas-options=-v -std=c++14 --compiler-options -Wall -gencode arch=compute_86,code=sm_86)[m
+ [m
+[32m+[m[32mif(DPE_DEBUG_SYNC)[m
+[32m+[m[32m    add_definitions(-DDPE_DEBUG_SYNC)[m
+[32m+[m[32mendif()[m
+[32m+[m[32mif(DPE_DEBUG_COMPLEX)[m
+[32m+[m[32m    add_definitions(-DDPE_DEBUG_COMPLEX)[m
+[32m+[m[32mendif()[m
+[32m+[m
+ if(CMAKE_COMPILER_IS_GNUCXX)[m
+     add_definitions(-std=c++14)[m
+     add_definitions(-pthread)[m
+[1mdiff --git a/DPE.cpp b/DPE.cpp[m
+[1mindex bd00948..3c3b4cf 100644[m
+[1m--- a/DPE.cpp[m
+[1m+++ b/DPE.cpp[m
+[36m@@ -684,61 +684,249 @@[m [mstd::string ToFormatIndex(int index) {[m
+ 	return ss.str();[m
+ }[m
+ [m
+[31m-DPE::DPE(const Problem &problem) {[m
+[32m+[m[32mvoid StateStore::Put(int image_id, const cv::Mat &depth, const cv::Mat &normal,[m
+[32m+[m	[32mconst cv::Mat &weak, const cv::Mat &selected_views) {[m
+[32m+[m	[32mViewState &state = states_[image_id];[m
+[32m+[m	[32mstate.depth = depth;[m
+[32m+[m	[32mstate.normal = normal;[m
+[32m+[m	[32mstate.weak = weak;[m
+[32m+[m	[32mstate.selected_views = selected_views;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mconst ViewState* StateStore::Get(int image_id) const {[m
+[32m+[m	[32mauto it = states_.find(image_id);[m
+[32m+[m	[32mreturn it == states_.end() ? nullptr : &it->second;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mbool StateStore::Has(int image_id) const {[m
+[32m+[m	[32mreturn states_.find(image_id) != states_.end();[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mSceneCache::SceneCache(const path &dense_folder)[m
+[32m+[m	[32m: image_folder_(dense_folder / path("images")),[m
+[32m+[m	[32m  camera_folder_(dense_folder / path("cams")), active_scale_size_(1) {}[m
+[32m+[m
+[32m+[m[32mconst cv::Mat& SceneCache::GetGrayImage(int image_id) {[m
+[32m+[m	[32mauto it = gray_images_.find(image_id);[m
+[32m+[m	[32mif (it != gray_images_.end()) return it->second;[m
+[32m+[m	[32mpath image_path = image_folder_ / path(ToFormatIndex(image_id) + ".jpg");[m
+[32m+[m	[32mcv::Mat image = cv::imread(image_path.string(), cv::IMREAD_GRAYSCALE);[m
+[32m+[m	[32mif (image.empty()) {[m
+[32m+[m		[32mthrow std::runtime_error("Cannot read image: " + image_path.string());[m
+[32m+[m	[32m}[m
+[32m+[m	[32mreturn gray_images_.emplace(image_id, image).first->second;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mconst cv::Mat& SceneCache::GetGrayFloatImage(int image_id, int scale_size) {[m
+[32m+[m	[32mif (scale_size != active_scale_size_) SetActiveScale(scale_size);[m
+[32m+[m	[32mauto it = active_float_images_.find(image_id);[m
+[32m+[m	[32mif (it != active_float_images_.end()) return it->second;[m
+[32m+[m
+[32m+[m	[32mconst cv::Mat &image_uint = GetGrayImage(image_id);[m
+[32m+[m	[32mcv::Mat image_float;[m
+[32m+[m	[32mimage_uint.convertTo(image_float, CV_32FC1);[m
+[32m+[m	[32mif (scale_size != 1) {[m
+[32m+[m		[32mconst float factor = 1.0f / static_cast<float>(scale_size);[m
+[32m+[m		[32mconst int new_cols = std::round(image_float.cols * factor);[m
+[32m+[m		[32mconst int new_rows = std::round(image_float.rows * factor);[m
+[32m+[m		[32mcv::Mat scaled;[m
+[32m+[m		[32mcv::resize(image_float, scaled, cv::Size(new_cols, new_rows), 0, 0, cv::INTER_LINEAR);[m
+[32m+[m		[32mimage_float = scaled;[m
+[32m+[m	[32m}[m
+[32m+[m	[32mreturn active_float_images_.emplace(image_id, image_float).first->second;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mCamera SceneCache::GetCamera(int image_id, int target_width, int target_height) {[m
+[32m+[m	[32mauto it = cameras_.find(image_id);[m
+[32m+[m	[32mif (it == cameras_.end()) {[m
+[32m+[m		[32mCamera camera;[m
+[32m+[m		[32mpath camera_path = camera_folder_ / path(ToFormatIndex(image_id) + "_cam.txt");[m
+[32m+[m		[32mif (!ReadCamera(camera_path, camera)) {[m
+[32m+[m			[32mthrow std::runtime_error("Cannot read camera: " + camera_path.string());[m
+[32m+[m		[32m}[m
+[32m+[m		[32mit = cameras_.emplace(image_id, camera).first;[m
+[32m+[m	[32m}[m
+[32m+[m	[32mCamera camera = it->second;[m
+[32m+[m	[32mconst cv::Mat &base_image = GetGrayImage(image_id);[m
+[32m+[m	[32mconst float scale_x = target_width / static_cast<float>(base_image.cols);[m
+[32m+[m	[32mconst float scale_y = target_height / static_cast<float>(base_image.rows);[m
+[32m+[m	[32mcamera.K[0] *= scale_x;[m
+[32m+[m	[32mcamera.K[2] *= scale_x;[m
+[32m+[m	[32mcamera.K[4] *= scale_y;[m
+[32m+[m	[32mcamera.K[5] *= scale_y;[m
+[32m+[m	[32mcamera.width = target_width;[m
+[32m+[m	[32mcamera.height = target_height;[m
+[32m+[m	[32mreturn camera;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mvoid SceneCache::SetActiveScale(int scale_size) {[m
+[32m+[m	[32mif (active_scale_size_ == scale_size) return;[m
+[32m+[m	[32mactive_float_images_.clear();[m
+[32m+[m	[32mactive_scale_size_ = scale_size;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32msize_t SceneCache::ImageBytes() const {[m
+[32m+[m	[32msize_t bytes = 0;[m
+[32m+[m	[32mfor (const auto &item : gray_images_) bytes += item.second.total() * item.second.elemSize();[m
+[32m+[m	[32mfor (const auto &item : active_float_images_) bytes += item.second.total() * item.second.elemSize();[m
+[32m+[m	[32mreturn bytes;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mGpuWorkspace::GpuWorkspace() : reserved_bytes_(0) {}[m
+[32m+[m
+[32m+[m[32mGpuWorkspace::~GpuWorkspace() {[m
+[32m+[m	[32mfor (const auto &block : free_blocks_) cudaFree(block.second);[m
+[32m+[m	[32mfor (const auto &block : live_blocks_) cudaFree(block.first);[m
+[32m+[m	[32mfor (const auto &entry : free_arrays_)[m
+[32m+[m		[32mfor (cudaArray *array : entry.second) cudaFreeArray(array);[m
+[32m+[m	[32mfor (const auto &entry : live_arrays_) cudaFreeArray(entry.first);[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mvoid* GpuWorkspace::Acquire(size_t bytes) {[m
+[32m+[m	[32mif (bytes == 0) return nullptr;[m
+[32m+[m	[32mauto it = free_blocks_.lower_bound(bytes);[m
+[32m+[m	[32mvoid *ptr = nullptr;[m
+[32m+[m	[32msize_t capacity = bytes;[m
+[32m+[m	[32mif (it != free_blocks_.end()) {[m
+[32m+[m		[32mcapacity = it->first;[m
+[32m+[m		[32mptr = it->second;[m
+[32m+[m		[32mfree_blocks_.erase(it);[m
+[32m+[m	[32m} else {[m
+[32m+[m		[32mCUDA_SAFE_CALL(cudaMalloc(&ptr, bytes));[m
+[32m+[m		[32mreserved_bytes_ += bytes;[m
+[32m+[m	[32m}[m
+[32m+[m	[32mlive_blocks_[ptr] = capacity;[m
+[32m+[m	[32mreturn ptr;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mvoid GpuWorkspace::Release(void *ptr) {[m
+[32m+[m	[32mif (!ptr) return;[m
+[32m+[m	[32mauto it = live_blocks_.find(ptr);[m
+[32m+[m	[32mif (it == live_blocks_.end()) return;[m
+[32m+[m	[32mfree_blocks_.emplace(it->second, ptr);[m
+[32m+[m	[32mlive_blocks_.erase(it);[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mcudaArray* GpuWorkspace::AcquireArray(int width, int height) {[m
+[32m+[m	[32mconst auto key = std::make_pair(width, height);[m
+[32m+[m	[32mauto &arrays = free_arrays_[key];[m
+[32m+[m	[32mif (!arrays.empty()) {[m
+[32m+[m		[32mcudaArray *array = arrays.back();[m
+[32m+[m		[32marrays.pop_back();[m
+[32m+[m		[32mlive_arrays_[array] = key;[m
+[32m+[m		[32mreturn array;[m
+[32m+[m	[32m}[m
+[32m+[m	[32mcudaChannelFormatDesc channel_desc = cudaCreateChannelDesc(32, 0, 0, 0, cudaChannelFormatKindFloat);[m
+[32m+[m	[32mcudaArray *array = nullptr;[m
+[32m+[m	[32mCUDA_SAFE_CALL(cudaMallocArray(&array, &channel_desc, width, height));[m
+[32m+[m	[32mreserved_bytes_ += static_cast<size_t>(width) * height * sizeof(float);[m
+[32m+[m	[32mlive_arrays_[array] = key;[m
+[32m+[m	[32mreturn array;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mvoid GpuWorkspace::ReleaseArray(cudaArray *array, int width, int height) {[m
+[32m+[m	[32mif (!array) return;[m
+[32m+[m	[32mauto it = live_arrays_.find(array);[m
+[32m+[m	[32mconst auto key = it == live_arrays_.end() ? std::make_pair(width, height) : it->second;[m
+[32m+[m	[32mif (it != live_arrays_.end()) live_arrays_.erase(it);[m
+[32m+[m	[32mfree_arrays_[key].push_back(array);[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32msize_t GpuWorkspace::ReservedBytes() const {[m
+[32m+[m	[32mreturn reserved_bytes_;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mDPE::DPE(const Problem &problem, SceneCache *scene_cache,[m
+[32m+[m	[32mconst StateStore *state_store, GpuWorkspace *gpu_workspace) {[m
+ 	params_host = problem.params;[m
+ 	this->problem = problem;[m
+[32m+[m	[32mthis->scene_cache = scene_cache;[m
+[32m+[m	[32mthis->state_store = state_store;[m
+[32m+[m	[32mthis->gpu_workspace = gpu_workspace;[m
+[32m+[m	[32mlast_gpu_time_ms = 0.0f;[m
+[32m+[m	[32mnum_images = width = height = low_width = low_height = weak_count = 0;[m
+[32m+[m	[32mtexture_objects_cuda = texture_depths_cuda = nullptr;[m
+[32m+[m	[32mcameras_cuda = nullptr;[m
+[32m+[m	[32mplane_hypotheses_host = nullptr;[m
+[32m+[m	[32mplane_hypotheses_cuda = fit_plane_hypotheses_cuda = nullptr;[m
+[32m+[m	[32mweak_info_cuda = weak_reliable_cuda = nullptr;[m
+[32m+[m	[32mweak_nearest_strong = nullptr;[m
+[32m+[m	[32mneighbours_cuda = nullptr;[m
+[32m+[m	[32mneigbours_map_cuda = nullptr;[m
+[32m+[m	[32medge_cuda = edge_low_res_cuda = nullptr;[m
+[32m+[m	[32medge_neigh_cuda = nullptr;[m
+[32m+[m	[32mradius_cuda = nullptr;[m
+[32m+[m	[32mlabel_cuda = nullptr;[m
+[32m+[m	[32mlabel_boundary_cuda = nullptr;[m
+[32m+[m	[32mcomplex_cuda = nullptr;[m
+[32m+[m	[32mcosts_cuda = nullptr;[m
+[32m+[m	[32mparams_cuda = nullptr;[m
+[32m+[m	[32mrand_states_cuda = nullptr;[m
+[32m+[m	[32mselected_views_cuda = nullptr;[m
+[32m+[m	[32mhelper_cuda = nullptr;[m
+[32m+[m	[32mview_weight_cuda = nullptr;[m
+[32m+[m	[32mstd::fill(cuArray, cuArray + MAX_IMAGES, nullptr);[m
+[32m+[m	[32mstd::fill(cuDepthArray, cuDepthArray + MAX_IMAGES, nullptr);[m
+ }[m
+ [m
+ DPE::~DPE() {[m
+ 	delete[] plane_hypotheses_host;[m
+[32m+[m	[32mauto release_buffer = [this](void *ptr) {[m
+[32m+[m		[32mif (!ptr) return;[m
+[32m+[m		[32mif (gpu_workspace) gpu_workspace->Release(ptr);[m
+[32m+[m		[32melse cudaFree(ptr);[m
+[32m+[m	[32m};[m
+ [m
+ 	if (problem.params.use_edge || problem.params.use_limit) {[m
+[31m-		cudaFree(edge_cuda);[m
+[32m+[m		[32mrelease_buffer(edge_cuda);[m
+[32m+[m		[32mrelease_buffer(edge_low_res_cuda);[m
+ 	}[m
+ 	if (problem.params.use_edge) {[m
+[31m-		cudaFree(edge_neigh_cuda);[m
+[31m-		cudaFree(complex_cuda);[m
+[32m+[m		[32mrelease_buffer(edge_neigh_cuda);[m
+[32m+[m		[32mrelease_buffer(complex_cuda);[m
+ 	}[m
+ 	if (problem.params.use_label) {[m
+[31m-		cudaFree(label_cuda);[m
+[31m-		cudaFree(label_boundary_cuda);[m
+[32m+[m		[32mrelease_buffer(label_cuda);[m
+[32m+[m		[32mrelease_buffer(label_boundary_cuda);[m
+ 	}[m
+ 	if (problem.params.use_radius) {[m
+[31m-		cudaFree(radius_cuda);[m
+[32m+[m		[32mrelease_buffer(radius_cuda);[m
+ 	}[m
+ 	// free images[m
+ 	{[m
+ 		for (int i = 0; i < num_images; ++i) {[m
+ 			cudaDestroyTextureObject(texture_objects_host.images[i]);[m
+[31m-			cudaFreeArray(cuArray[i]);[m
+[32m+[m			[32mif (gpu_workspace) gpu_workspace->ReleaseArray(cuArray[i], width, height);[m
+[32m+[m			[32melse cudaFreeArray(cuArray[i]);[m
+ 		}[m
+[31m-		cudaFree(texture_objects_cuda);[m
+[32m+[m		[32mrelease_buffer(texture_objects_cuda);[m
+ 	}[m
+ 	// may free depths[m
+ 	if (params_host.geom_consistency) {[m
+ 		for (int i = 0; i < num_images; ++i) {[m
+ 			cudaDestroyTextureObject(texture_depths_host.images[i]);[m
+[31m-			cudaFreeArray(cuDepthArray[i]);[m
+[32m+[m			[32mif (gpu_workspace) gpu_workspace->ReleaseArray(cuDepthArray[i], width, height);[m
+[32m+[m			[32melse cudaFreeArray(cuDepthArray[i]);[m
+ 		}[m
+[31m-		cudaFree(texture_depths_cuda);[m
+[32m+[m		[32mrelease_buffer(texture_depths_cuda);[m
+ 	}[m
+ 	// may free supports[m
+[31m-	cudaFree(cameras_cuda);[m
+[31m-	cudaFree(plane_hypotheses_cuda);[m
+[31m-	cudaFree(fit_plane_hypotheses_cuda);[m
+[31m-	cudaFree(costs_cuda);[m
+[31m-	cudaFree(rand_states_cuda);[m
+[31m-	cudaFree(selected_views_cuda);[m
+[31m-	cudaFree(params_cuda);[m
+[31m-	cudaFree(helper_cuda);[m
+[31m-	cudaFree(neighbours_cuda);[m
+[31m-	cudaFree(neigbours_map_cuda);[m
+[31m-	cudaFree(weak_info_cuda);[m
+[31m-	cudaFree(weak_reliable_cuda);[m
+[31m-	cudaFree(view_weight_cuda);[m
+[31m-	cudaFree(weak_nearest_strong);[m
+[32m+[m	[32mrelease_buffer(cameras_cuda);[m
+[32m+[m	[32mrelease_buffer(plane_hypotheses_cuda);[m
+[32m+[m	[32mrelease_buffer(fit_plane_hypotheses_cuda);[m
+[32m+[m	[32mrelease_buffer(costs_cuda);[m
+[32m+[m	[32mrelease_buffer(rand_states_cuda);[m
+[32m+[m	[32mrelease_buffer(selected_views_cuda);[m
+[32m+[m	[32mrelease_buffer(params_cuda);[m
+[32m+[m	[32mrelease_buffer(helper_cuda);[m
+[32m+[m	[32mrelease_buffer(neighbours_cuda);[m
+[32m+[m	[32mrelease_buffer(neigbours_map_cuda);[m
+[32m+[m	[32mrelease_buffer(weak_info_cuda);[m
+[32m+[m	[32mrelease_buffer(weak_reliable_cuda);[m
+[32m+[m	[32mrelease_buffer(view_weight_cuda);[m
+[32m+[m	[32mrelease_buffer(weak_nearest_strong);[m
+ #ifdef DEBUG_COST_LINE[m
+[31m-	cudaFree(weak_ncc_cost_cuda);[m
+[32m+[m	[32mrelease_buffer(weak_ncc_cost_cuda);[m
+ #endif // DEBUG_COST_LINE[m
+ [m
+ }[m
+[36m@@ -746,56 +934,20 @@[m [mDPE::~DPE() {[m
+ void DPE::InuputInitialization() {[m
+ 	images.clear();[m
+ 	cameras.clear();[m
+[31m-	// get folder[m
+[31m-	path image_folder = problem.dense_folder / path("images");[m
+[31m-	path cam_folder = problem.dense_folder / path("cams");[m
+[31m-	//path weak_folder = problem.dense_folder / path("weaks");[m
+[31m-	// =================================================[m
+[31m-	// read ref image and src images[m
+[31m-	// ref[m
+[31m-	{ [m
+[31m-		path ref_image_path = image_folder / path(ToFormatIndex(problem.ref_image_id) + ".jpg");[m
+[31m-		cv::Mat_<uint8_t> image_uint = cv::imread(ref_image_path.string(), cv::IMREAD_GRAYSCALE);[m
+[31m-		cv::Mat image_float;[m
+[31m-		image_uint.convertTo(image_float, CV_32FC1);[m
+[31m-		images.push_back(image_float);[m
+[31m-		width = image_float.cols;[m
+[31m-		height = image_float.rows;[m
+[31m-	}[m
+[31m-	// src[m
+[31m-	for (const auto &src_idx : problem.src_image_ids) {[m
+[31m-		path src_image_path = image_folder / path(ToFormatIndex(src_idx) + ".jpg");[m
+[31m-		cv::Mat_<uint8_t> image_uint = cv::imread(src_image_path.string(), cv::IMREAD_GRAYSCALE);[m
+[31m-		cv::Mat image_float;[m
+[31m-		image_uint.convertTo(image_float, CV_32FC1);[m
+[31m-		images.push_back(image_float);[m
+[31m-		// assert: images_float.cols == width;[m
+[31m-		// assert: images_float.rows == height;[m
+[31m-	}[m
+[32m+[m	[32mSceneCache local_cache(problem.dense_folder);[m
+[32m+[m	[32mSceneCache *cache = scene_cache ? scene_cache : &local_cache;[m
+[32m+[m	[32mimages.push_back(cache->GetGrayFloatImage(problem.ref_image_id, problem.scale_size));[m
+[32m+[m	[32mwidth = images.front().cols;[m
+[32m+[m	[32mheight = images.front().rows;[m
+[32m+[m	[32mfor (const auto &src_idx : problem.src_image_ids)[m
+[32m+[m		[32mimages.push_back(cache->GetGrayFloatImage(src_idx, problem.scale_size));[m
+ 	if (images.size() > MAX_IMAGES) {[m
+ 		std::cerr << "Can't process so much images: " << images.size() << std::endl;[m
+ 		exit(EXIT_FAILURE);[m
+ 	}[m
+[31m-	// =================================================[m
+[31m-	// read ref camera and src camera[m
+[31m-	// ref[m
+[31m-	{[m
+[31m-		path ref_cam_path = cam_folder / path(ToFormatIndex(problem.ref_image_id) + "_cam.txt");[m
+[31m-		Camera cam;[m
+[31m-		ReadCamera(ref_cam_path, cam);[m
+[31m-		cam.width = width;[m
+[31m-		cam.height = height;[m
+[31m-		cameras.push_back(cam);[m
+[31m-	}[m
+[31m-	// src[m
+[31m-	for (const auto &src_idx : problem.src_image_ids) {[m
+[31m-		path src_cam_path = cam_folder / path(ToFormatIndex(src_idx) + "_cam.txt");[m
+[31m-		Camera cam;[m
+[31m-		ReadCamera(src_cam_path, cam);[m
+[31m-		cam.width = width;[m
+[31m-		cam.height = height;[m
+[31m-		cameras.push_back(cam);[m
+[31m-	}[m
+[32m+[m	[32mcameras.push_back(cache->GetCamera(problem.ref_image_id, width, height));[m
+[32m+[m	[32mfor (const auto &src_idx : problem.src_image_ids)[m
+[32m+[m		[32mcameras.push_back(cache->GetCamera(src_idx, width, height));[m
+ 	// =================================================[m
+ 	// set some params[m
+ 	params_host.depth_min = cameras[0].depth_min * 0.6f;[m
+[36m@@ -806,46 +958,24 @@[m [mvoid DPE::InuputInitialization() {[m
+ 	std::cout << "Read images and camera done\n";[m
+ 	std::cout << "Depth range: " << params_host.depth_min << " " << params_host.depth_max << std::endl;[m
+ 	std::cout << "Num images: " << params_host.num_images << std::endl;[m
+[31m-	// =================================================[m
+[31m-	// scale images[m
+[31m-	if (problem.scale_size != 1) {[m
+[31m-		for (int i = 0; i < num_images; ++i) {[m
+[31m-			const float factor = 1.0f / (float)(problem.scale_size);[m
+[31m-			const int new_cols = std::round(images[i].cols * factor);[m
+[31m-			const int new_rows = std::round(images[i].rows * factor);[m
+[31m-[m
+[31m-			const float scale_x = new_cols / static_cast<float>(images[i].cols);[m
+[31m-			const float scale_y = new_rows / static_cast<float>(images[i].rows);[m
+[31m-[m
+[31m-			cv::Mat_<float> scaled_image_float;[m
+[31m-			cv::resize(images[i], scaled_image_float, cv::Size(new_cols, new_rows), 0, 0, cv::INTER_LINEAR);[m
+[31m-			images[i] = scaled_image_float.clone();[m
+[31m-[m
+[31m-			width = scaled_image_float.cols;[m
+[31m-			height = scaled_image_float.rows;[m
+[31m-[m
+[31m-			cameras[i].K[0] *= scale_x;[m
+[31m-			cameras[i].K[2] *= scale_x;[m
+[31m-			cameras[i].K[4] *= scale_y;[m
+[31m-			cameras[i].K[5] *= scale_y;[m
+[31m-			cameras[i].width = width;[m
+[31m-			cameras[i].height = height;[m
+[31m-		}[m
+[31m-		std::cout << "Scale images and cameras done\n";[m
+[31m-	}[m
+ 	std::cout << "Image size: " << width << " * " << height << std::endl;[m
+ 	// =================================================[m
+ 	// read depth form geom consistency[m
+ 	if (params_host.geom_consistency) {[m
+ 		depths.clear();[m
+[31m-		path ref_depth_path = problem.result_folder / path("depths.dmb");[m
+[32m+[m		[32mconst ViewState *ref_state = state_store ? state_store->Get(problem.ref_image_id) : nullptr;[m
+ 		cv::Mat ref_depth;[m
+[31m-		ReadBinMat(ref_depth_path, ref_depth);[m
+[32m+[m		[32mif (ref_state) ref_depth = ref_state->depth;[m
+[32m+[m		[32melse ReadBinMat(problem.result_folder / path("depths.dmb"), ref_depth);[m
+ 		depths.push_back(ref_depth);[m
+ 		for (const auto &src_idx : problem.src_image_ids) {[m
+[31m-			path src_depth_path = problem.dense_folder / path("DPE") / path(ToFormatIndex(src_idx)) / path("depths.dmb");[m
+ 			cv::Mat src_depth;[m
+[31m-			ReadBinMat(src_depth_path, src_depth);[m
+[32m+[m			[32mconst ViewState *src_state = state_store ? state_store->Get(src_idx) : nullptr;[m
+[32m+[m			[32mif (src_state) src_depth = src_state->depth;[m
+[32m+[m			[32melse {[m
+[32m+[m				[32mpath src_depth_path = problem.dense_folder / path("DPE") / path(ToFormatIndex(src_idx)) / path("depths.dmb");[m
+[32m+[m				[32mReadBinMat(src_depth_path, src_depth);[m
+[32m+[m			[32m}[m
+ 			depths.push_back(src_depth);[m
+ 		}[m
+ 		for (auto &depth : depths) {[m
+[36m@@ -858,12 +988,16 @@[m [mvoid DPE::InuputInitialization() {[m
+ 	// =================================================[m
+ 	// read weak info[m
+ 	if (params_host.use_APD) {[m
+[31m-		path weak_info_path = problem.result_folder / path("weak.bin");[m
+[31m-		if (!exists(weak_info_path)) {[m
+[31m-			std::cerr << "Can't find weak info file: " << weak_info_path.string() << std::endl;[m
+[31m-			exit(EXIT_FAILURE);[m
+[32m+[m		[32mconst ViewState *state = state_store ? state_store->Get(problem.ref_image_id) : nullptr;[m
+[32m+[m		[32mif (state) weak_info_host = state->weak;[m
+[32m+[m		[32melse {[m
+[32m+[m			[32mpath weak_info_path = problem.result_folder / path("weak.bin");[m
+[32m+[m			[32mif (!exists(weak_info_path)) {[m
+[32m+[m				[32mstd::cerr << "Can't find weak info file: " << weak_info_path.string() << std::endl;[m
+[32m+[m				[32mexit(EXIT_FAILURE);[m
+[32m+[m			[32m}[m
+[32m+[m			[32mReadBinMat(weak_info_path, weak_info_host);[m
+ 		}[m
+[31m-		ReadBinMat(weak_info_path, weak_info_host);[m
+ 		if (weak_info_host.cols != width || weak_info_host.rows != height) {[m
+ 			std::cerr << "Weak info doesn't match the images' size!\n";[m
+ 			RescaleMatToTargetSize<uchar>(weak_info_host, weak_info_host, cv::Size(width, height));[m
+[36m@@ -886,6 +1020,7 @@[m [mvoid DPE::InuputInitialization() {[m
+ 	}[m
+ 	else {[m
+ 		weak_info_host = cv::Mat::zeros(height, width, CV_8UC1);[m
+[32m+[m		[32mneighbours_map_host = cv::Mat::zeros(height, width, CV_32SC1);[m
+ 		weak_count = 0;[m
+ 		for (int r = 0; r < weak_info_host.rows; ++r) {[m
+ 			for (int c = 0; c < weak_info_host.cols; ++c) {[m
+[36m@@ -897,12 +1032,16 @@[m [mvoid DPE::InuputInitialization() {[m
+ 	plane_hypotheses_host = new float4[cameras[0].height * cameras[0].width];[m
+ 	selected_views_host = cv::Mat::zeros(height, width, CV_32SC1);[m
+ 	if (params_host.state != FIRST_INIT) {[m
+[31m-		// input plane hypotheses from existed result[m
+[31m-		path depth_path = problem.result_folder / path("depths.dmb");[m
+[31m-		path normal_path = problem.result_folder / path("normals.dmb");[m
+ 		cv::Mat depth, normal;[m
+[31m-		ReadBinMat(depth_path, depth);[m
+[31m-		ReadBinMat(normal_path, normal);[m
+[32m+[m		[32mconst ViewState *state = state_store ? state_store->Get(problem.ref_image_id) : nullptr;[m
+[32m+[m		[32mif (state) {[m
+[32m+[m			[32mdepth = state->depth;[m
+[32m+[m			[32mnormal = state->normal;[m
+[32m+[m			[32mselected_views_host = state->selected_views;[m
+[32m+[m		[32m} else {[m
+[32m+[m			[32mReadBinMat(problem.result_folder / path("depths.dmb"), depth);[m
+[32m+[m			[32mReadBinMat(problem.result_folder / path("normals.dmb"), normal);[m
+[32m+[m		[32m}[m
+ 		if (depth.cols != width || depth.rows != height || normal.cols != width || normal.rows != height) {[m
+ 			std::cerr << "Depth and Normal doesn't match the images' size!\n";[m
+ 			RescaleMatToTargetSize<float>(depth, depth, cv::Size2i(width, height));[m
+[36m@@ -917,24 +1056,29 @@[m [mvoid DPE::InuputInitialization() {[m
+ 				plane_hypotheses_host[center].z = normal.at<cv::Vec3f>(row, col)[2];[m
+ 			}[m
+ 		}[m
+[31m-		{[m
+[32m+[m		[32mif (!state) {[m
+ 			path selected_view_path = problem.result_folder / path("selected_views.bin");[m
+ 			ReadBinMat(selected_view_path, selected_views_host);[m
+[31m-			if (selected_views_host.cols != width || selected_views_host.rows != height) {[m
+[31m-				std::cerr << "Select view doesn't match the images' size!\n";[m
+[31m-				RescaleMatToTargetSize<unsigned int>(selected_views_host, selected_views_host, cv::Size2i(width, height));[m
+[31m-			}[m
+[32m+[m		[32m}[m
+[32m+[m		[32mif (selected_views_host.cols != width || selected_views_host.rows != height) {[m
+[32m+[m			[32mstd::cerr << "Select view doesn't match the images' size!\n";[m
+[32m+[m			[32mRescaleMatToTargetSize<unsigned int>(selected_views_host, selected_views_host, cv::Size2i(width, height));[m
+ 		}[m
+ 	}[m
+ 	// =================================================[m
+ }[m
+ [m
+ void DPE::CudaSpaceInitialization() {[m
+[32m+[m	[32mauto allocate = [this](void **ptr, size_t bytes) {[m
+[32m+[m		[32mif (gpu_workspace) *ptr = gpu_workspace->Acquire(bytes);[m
+[32m+[m		[32melse CUDA_SAFE_CALL(cudaMalloc(ptr, bytes));[m
+[32m+[m	[32m};[m
+ 	// =================================================[m
+ 	// move images to gpu[m
+ 	for (int i = 0; i < num_images; ++i) {[m
+ 		cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(32, 0, 0, 0, cudaChannelFormatKindFloat);[m
+[31m-		cudaMallocArray(&cuArray[i], &channelDesc, width, height);[m
+[32m+[m		[32mif (gpu_workspace) cuArray[i] = gpu_workspace->AcquireArray(width, height);[m
+[32m+[m		[32melse CUDA_SAFE_CALL(cudaMallocArray(&cuArray[i], &channelDesc, width, height));[m
+ 		cudaMemcpy2DToArray(cuArray[i], 0, 0, images[i].ptr<float>(), images[i].step[0], width * sizeof(float), height, cudaMemcpyHostToDevice);[m
+ 		struct cudaResourceDesc resDesc;[m
+ 		memset(&resDesc, 0, sizeof(cudaResourceDesc));[m
+[36m@@ -949,7 +1093,7 @@[m [mvoid DPE::CudaSpaceInitialization() {[m
+ 		texDesc.normalizedCoords = 0;[m
+ 		cudaCreateTextureObject(&(texture_objects_host.images[i]), &resDesc, &texDesc, NULL);[m
+ 	}[m
+[31m-	cudaMalloc((void**)&texture_objects_cuda, sizeof(cudaTextureObjects));[m
+[32m+[m	[32mallocate((void**)&texture_objects_cuda, sizeof(cudaTextureObjects));[m
+ 	cudaMemcpy(texture_objects_cuda, &texture_objects_host, sizeof(cudaTextureObjects), cudaMemcpyHostToDevice);[m
+ 	// may move depths to gpu[m
+ 	if (params_host.geom_consistency) {[m
+[36m@@ -957,7 +1101,8 @@[m [mvoid DPE::CudaSpaceInitialization() {[m
+ 			int height = depths[i].rows;[m
+ 			int width = depths[i].cols;[m
+ 			cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(32, 0, 0, 0, cudaChannelFormatKindFloat);[m
+[31m-			cudaMallocArray(&cuDepthArray[i], &channelDesc, width, height);[m
+[32m+[m			[32mif (gpu_workspace) cuDepthArray[i] = gpu_workspace->AcquireArray(width, height);[m
+[32m+[m			[32melse CUDA_SAFE_CALL(cudaMallocArray(&cuDepthArray[i], &channelDesc, width, height));[m
+ 			cudaMemcpy2DToArray(cuDepthArray[i], 0, 0, depths[i].ptr<float>(), depths[i].step[0], width * sizeof(float), height, cudaMemcpyHostToDevice);[m
+ 			struct cudaResourceDesc resDesc;[m
+ 			memset(&resDesc, 0, sizeof(cudaResourceDesc));[m
+[36m@@ -972,69 +1117,70 @@[m [mvoid DPE::CudaSpaceInitialization() {[m
+ 			texDesc.normalizedCoords = 0;[m
+ 			cudaCreateTextureObject(&(texture_depths_host.images[i]), &resDesc, &texDesc, NULL);[m
+ 		}[m
+[31m-		cudaMalloc((void**)&texture_depths_cuda, sizeof(cudaTextureObjects));[m
+[32m+[m		[32mallocate((void**)&texture_depths_cuda, sizeof(cudaTextureObjects));[m
+ 		cudaMemcpy(texture_depths_cuda, &texture_depths_host, sizeof(cudaTextureObjects), cudaMemcpyHostToDevice);[m
+ 	}[m
+ 	// =================================================[m
+ 	// move camera to gpu[m
+[31m-	cudaMalloc((void**)&cameras_cuda, sizeof(Camera) * (num_images));[m
+[32m+[m	[32mallocate((void**)&cameras_cuda, sizeof(Camera) * (num_images));[m
+ 	cudaMemcpy(cameras_cuda, &cameras[0], sizeof(Camera) * (num_images), cudaMemcpyHostToDevice);[m
+ 	// malloc memory for important data structure[m
+ 	const int length = width * height;[m
+ 	// define cost[m
+[31m-	cudaMalloc((void**)&costs_cuda, sizeof(float) * length);[m
+[32m+[m	[32mallocate((void**)&costs_cuda, sizeof(float) * length);[m
+ 	// malloc memory for rand states[m
+[31m-	cudaMalloc((void**)&rand_states_cuda, sizeof(curandState) * length);[m
+[32m+[m	[32mallocate((void**)&rand_states_cuda, sizeof(curandState) * length);[m
+ 	// malloc for selected_views[m
+[31m-	cudaMalloc((void**)&selected_views_cuda, sizeof(unsigned int) * length);[m
+[32m+[m	[32mallocate((void**)&selected_views_cuda, sizeof(unsigned int) * length);[m
+ 	cudaMemcpy(selected_views_cuda, selected_views_host.ptr<unsigned int>(0), sizeof(unsigned int) * length, cudaMemcpyHostToDevice);[m
+ 	// view weight[m
+[31m-	cudaMalloc((void**)&view_weight_cuda, sizeof(uchar) * length * MAX_IMAGES);[m
+[32m+[m	[32mallocate((void**)&view_weight_cuda, sizeof(uchar) * length * MAX_IMAGES);[m
+ 	// move plane hypotheses to gpu[m
+[31m-	cudaMalloc((void**)&plane_hypotheses_cuda, sizeof(float4) * length);[m
+[32m+[m	[32mallocate((void**)&plane_hypotheses_cuda, sizeof(float4) * length);[m
+ 	cudaMemcpy(plane_hypotheses_cuda, plane_hypotheses_host, sizeof(float4) * length, cudaMemcpyHostToDevice);[m
+ 	// malloc memory for fit plane [m
+[31m-	cudaMalloc((void**)&fit_plane_hypotheses_cuda, sizeof(float4) * length);[m
+[32m+[m	[32mallocate((void**)&fit_plane_hypotheses_cuda, sizeof(float4) * length);[m
+ 	cudaMemset(fit_plane_hypotheses_cuda, 0, sizeof(float4) * length);[m
+ [m
+ 	// malloc edge array[m
+ 	if (problem.params.use_edge || problem.params.use_limit) {[m
+[31m-		cudaMalloc((void**)&edge_cuda, sizeof(uint8_t) * length);[m
+[32m+[m		[32mallocate((void**)&edge_cuda, sizeof(uint8_t) * length);[m
+ 		cudaMemcpy(edge_cuda, edge_host.ptr<uchar>(0), sizeof(uchar) * length, cudaMemcpyHostToDevice);[m
+[31m-		cudaMalloc((void**)&edge_low_res_cuda, sizeof(uint8_t) * low_height * low_width);[m
+[32m+[m		[32mallocate((void**)&edge_low_res_cuda, sizeof(uint8_t) * low_height * low_width);[m
+ 		cudaMemcpy(edge_low_res_cuda, edge_low_res_host.ptr<uchar>(0), sizeof(uchar) * low_height * low_width, cudaMemcpyHostToDevice);[m
+ 	}[m
+ 	if (problem.params.use_edge) {[m
+[31m-		cudaMalloc((void **)(&edge_neigh_cuda), length * 8 * sizeof(short2));[m
+[31m-		cudaMalloc((void**)&complex_cuda, sizeof(float) * length);[m
+[32m+[m		[32mallocate((void **)(&edge_neigh_cuda), length * 8 * sizeof(short2));[m
+[32m+[m		[32mallocate((void**)&complex_cuda, sizeof(float) * length);[m
+ 	}[m
+ 	if (problem.params.use_label) {[m
+[31m-		cudaMalloc((void**)(&label_cuda), length * sizeof(int));[m
+[32m+[m		[32mallocate((void**)(&label_cuda), length * sizeof(int));[m
+ 		cudaMemcpy(label_cuda, label_host.ptr<int>(0), sizeof(int) * (height * width), cudaMemcpyHostToDevice);[m
+[31m-		cudaMalloc((void **)(&label_boundary_cuda), weak_count * 8 * sizeof(short2));[m
+[32m+[m		[32mallocate((void **)(&label_boundary_cuda), weak_count * 8 * sizeof(short2));[m
+ 	}[m
+ 	if (problem.params.use_radius) {[m
+[31m-		cudaMalloc((void**)(&radius_cuda), length * sizeof(int));[m
+[32m+[m		[32mallocate((void**)(&radius_cuda), length * sizeof(int));[m
+ 	}[m
+ [m
+ 	// malloc memory for weak info[m
+[31m-	cudaMalloc((void **)(&weak_info_cuda), length * sizeof(uchar));[m
+[32m+[m	[32mallocate((void **)(&weak_info_cuda), length * sizeof(uchar));[m
+ 	cudaMemcpy(weak_info_cuda, weak_info_host.ptr<uchar>(0), length * sizeof(uchar), cudaMemcpyHostToDevice);[m
+ 	// malloc memory for weak reliable info[m
+[31m-	cudaMalloc((void **)(&weak_reliable_cuda), length * sizeof(uchar));[m
+[32m+[m	[32mallocate((void **)(&weak_reliable_cuda), length * sizeof(uchar));[m
+ 	// malloc memory for nearest strong points[m
+[31m-	cudaMalloc((void**)(&weak_nearest_strong), length * sizeof(short2));[m
+[32m+[m	[32mallocate((void**)(&weak_nearest_strong), length * sizeof(short2));[m
+ 	// move neighbour map to gpu[m
+[31m-	cudaMalloc((void**)(&neigbours_map_cuda), length * sizeof(int));[m
+[32m+[m	[32mallocate((void**)(&neigbours_map_cuda), length * sizeof(int));[m
+ 	cudaMemcpy(neigbours_map_cuda, neighbours_map_host.ptr<int>(0), length * sizeof(int), cudaMemcpyHostToDevice);[m
+ 	// malloc memory for deformable ncc[m
+[31m-	cudaMalloc((void **)(&neighbours_cuda), weak_count * NEIGHBOUR_NUM * sizeof(short2));[m
+[32m+[m	[32mallocate((void **)(&neighbours_cuda), weak_count * NEIGHBOUR_NUM * sizeof(short2));[m
+ 	// move param to gpu[m
+[31m-	cudaMalloc((void**)(&params_cuda), sizeof(PatchMatchParams));[m
+[32m+[m	[32mallocate((void**)(&params_cuda), sizeof(PatchMatchParams));[m
+ 	cudaMemcpy(params_cuda, &params_host, sizeof(PatchMatchParams), cudaMemcpyHostToDevice);[m
+ 	// =================================================[m
+ #ifdef DEBUG_COST_LINE[m
+[31m-	cudaMalloc((void**)(&weak_ncc_cost_cuda), sizeof(float) * width * height * 61);[m
+[32m+[m	[32mif (gpu_workspace) weak_ncc_cost_cuda = static_cast<float*>(gpu_workspace->Acquire(sizeof(float) * width * height * 61));[m
+[32m+[m	[32melse cudaMalloc((void**)(&weak_ncc_cost_cuda), sizeof(float) * width * height * 61);[m
+ #endif // DEBUG_COST_LINE[m
+ }[m
+ [m
+[36m@@ -1100,7 +1246,8 @@[m [mvoid DPE::SetDataPassHelperInCuda() {[m
+ #ifdef DEBUG_COST_LINE[m
+ 	helper_host.weak_ncc_cost_cuda = weak_ncc_cost_cuda;[m
+ #endif // DEBUG_COST_LINE[m
+[31m-	cudaMalloc((void**)(&helper_cuda), sizeof(DataPassHelper));[m
+[32m+[m	[32mif (gpu_workspace) helper_cuda = static_cast<DataPassHelper*>(gpu_workspace->Acquire(sizeof(DataPassHelper)));[m
+[32m+[m	[32melse cudaMalloc((void**)(&helper_cuda), sizeof(DataPassHelper));[m
+ 	cudaMemcpy(helper_cuda, &helper_host, sizeof(DataPassHelper), cudaMemcpyHostToDevice);[m
+ }[m
+ [m
+[36m@@ -1136,6 +1283,10 @@[m [mfloat DPE::GetDepthMax() {[m
+ 	return params_host.depth_max;[m
+ }[m
+ [m
+[32m+[m[32mfloat DPE::GetLastGpuTimeMs() {[m
+[32m+[m	[32mreturn last_gpu_time_ms;[m
+[32m+[m[32m}[m
+[32m+[m
+ void RescaleImageAndCamera(cv::Mat &src, cv::Mat &dst, cv::Mat &depth, Camera &camera)[m
+ {[m
+ 	const int cols = depth.cols;[m
+[36m@@ -1233,7 +1384,7 @@[m [mfloat GetAngle(const cv::Vec3f &v1, const cv::Vec3f &v2)[m
+ }[m
+ [m
+ // ETH version[m
+[31m-void RunFusion(const path &dense_folder, const std::vector<Problem> &problems)[m
+[32m+[m[32mvoid RunFusion(const path &dense_folder, const std::vector<Problem> &problems, const StateStore *state_store)[m
+ {[m
+ 	int num_images = problems.size();[m
+ 	path image_folder = dense_folder / path("images");[m
+[36m@@ -1272,13 +1423,17 @@[m [mvoid RunFusion(const path &dense_folder, const std::vector<Problem> &problems)[m
+ 		Camera camera;[m
+ 		ReadCamera(cam_path, camera);[m
+ 	[m
+[31m-		path depth_path = problem.result_folder / path("depths.dmb");[m
+[31m-		path normal_path = problem.result_folder / path("normals.dmb");[m
+[31m-		path weak_path = problem.result_folder / path("weak.bin");[m
+ 		cv::Mat depth, normal, weak;[m
+[31m-		ReadBinMat(depth_path, depth);[m
+[31m-		ReadBinMat(normal_path, normal);[m
+[31m-		ReadBinMat(weak_path, weak);[m
+[32m+[m		[32mconst ViewState *state = state_store ? state_store->Get(problem.ref_image_id) : nullptr;[m
+[32m+[m		[32mif (state) {[m
+[32m+[m			[32mdepth = state->depth;[m
+[32m+[m			[32mnormal = state->normal;[m
+[32m+[m			[32mweak = state->weak;[m
+[32m+[m		[32m} else {[m
+[32m+[m			[32mReadBinMat(problem.result_folder / path("depths.dmb"), depth);[m
+[32m+[m			[32mReadBinMat(problem.result_folder / path("normals.dmb"), normal);[m
+[32m+[m			[32mReadBinMat(problem.result_folder / path("weak.bin"), weak);[m
+[32m+[m		[32m}[m
+ 	[m
+ 		if (use_block) {[m
+ 			path block_path = block_folder / path("mask_" + std::to_string(problem.ref_image_id) + ".jpg");[m
+[1mdiff --git a/DPE.cu b/DPE.cu[m
+[1mindex 47ed82c..0397fe4 100644[m
+[1m--- a/DPE.cu[m
+[1m+++ b/DPE.cu[m
+[36m@@ -1,6 +1,10 @@[m
+ #include "DPE.h"[m
+ [m
+[31m-#define DEBUG_COMPLEX[m
+[32m+[m[32m#ifdef DPE_DEBUG_SYNC[m
+[32m+[m[32m#define DPE_POST_KERNEL() CUDA_SAFE_CALL(cudaDeviceSynchronize())[m
+[32m+[m[32m#else[m
+[32m+[m[32m#define DPE_POST_KERNEL() CUDA_SAFE_CALL(cudaPeekAtLastError())[m
+[32m+[m[32m#endif[m
+ [m
+ __device__  void sort_small(float *d, const int n)[m
+ {[m
+[36m@@ -3125,6 +3129,9 @@[m [m__global__ void RANSACToGetFitPlane(DataPassHelper *helper) {[m
+ [m
+ void DPE::RunPatchMatch() {[m
+ 	std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();[m
+[32m+[m	[32mcudaEvent_t gpu_start, gpu_stop;[m
+[32m+[m	[32mCUDA_SAFE_CALL(cudaEventCreate(&gpu_start));[m
+[32m+[m	[32mCUDA_SAFE_CALL(cudaEventCreate(&gpu_stop));[m
+ [m
+ 	int BLOCK_W = 32;[m
+ 	int BLOCK_H = (BLOCK_W / 2);[m
+[36m@@ -3147,12 +3154,13 @@[m [mvoid DPE::RunPatchMatch() {[m
+ 	block_size_half.y = BLOCK_H;[m
+ 	block_size_half.z = 1;[m
+ [m
+[32m+[m	[32mCUDA_SAFE_CALL(cudaEventRecord(gpu_start));[m
+ 	InitRandomStates << <grid_size_full, block_size_full >> >(helper_cuda);[m
+[31m-	CUDA_SAFE_CALL(cudaDeviceSynchronize());[m
+[32m+[m	[32mDPE_POST_KERNEL();[m
+ [m
+ 	GenEdgeInform << <grid_size_full, block_size_full >> > (helper_cuda);[m
+[31m-	CUDA_SAFE_CALL(cudaDeviceSynchronize());[m
+[31m-#ifdef DEBUG_COMPLEX[m
+[32m+[m	[32mDPE_POST_KERNEL();[m
+[32m+[m[32m#ifdef DPE_DEBUG_COMPLEX[m
+ 	path complex_path = problem.result_folder / path("complex.jpg");[m
+ 	cv::Mat complex_host(height, width, CV_32F);[m
+ 	cudaMemcpy(complex_host.ptr<float>(0), complex_cuda, width * height * sizeof(float), cudaMemcpyDeviceToHost);[m
+[36m@@ -3163,13 +3171,13 @@[m [mvoid DPE::RunPatchMatch() {[m
+ #endif[m
+ [m
+ 	FindNearestStrongPoint << <grid_size_full, block_size_full >> >(helper_cuda);[m
+[31m-	CUDA_SAFE_CALL(cudaDeviceSynchronize());[m
+[32m+[m	[32mDPE_POST_KERNEL();[m
+ [m
+ 	GenNeighbours << <grid_size_full, block_size_full >> > (helper_cuda);[m
+[31m-	CUDA_SAFE_CALL(cudaDeviceSynchronize());[m
+[32m+[m	[32mDPE_POST_KERNEL();[m
+ [m
+ 	NeigbourUpdate << <grid_size_full, block_size_full >> > (helper_cuda);[m
+[31m-	CUDA_SAFE_CALL(cudaDeviceSynchronize());[m
+[32m+[m	[32mDPE_POST_KERNEL();[m
+ 	[m
+ 	if (problem.show_medium_result) { // write neighbour for visualization[m
+ #ifdef DEBUG_NEIGHBOUR[m
+[36m@@ -3193,37 +3201,42 @@[m [mvoid DPE::RunPatchMatch() {[m
+ 	std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();[m
+ 	std::cout << "Generate neighbours done. Cost time: " << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() << " ms" << std::endl;[m
+ 	RandomInitialization << <grid_size_full, block_size_full >> > (helper_cuda);[m
+[31m-	CUDA_SAFE_CALL(cudaDeviceSynchronize());[m
+[32m+[m	[32mDPE_POST_KERNEL();[m
+ [m
+ 	for (int i = 0; i < params_host.max_iterations; ++i) {[m
+ 		BlackPixelUpdateStrong << <grid_size_half, block_size_half >> > (i, helper_cuda);[m
+[31m-		CUDA_SAFE_CALL(cudaDeviceSynchronize());[m
+[32m+[m		[32mDPE_POST_KERNEL();[m
+ 		RedPixelUpdateStrong << <grid_size_half, block_size_half >> > (i, helper_cuda);[m
+[31m-		CUDA_SAFE_CALL(cudaDeviceSynchronize());[m
+[32m+[m		[32mDPE_POST_KERNEL();[m
+ 		std::cout << "Iteration " << i << " strong done\n";[m
+ 		RANSACToGetFitPlane << <grid_size_full, block_size_full >> > (helper_cuda);[m
+[31m-		CUDA_SAFE_CALL(cudaDeviceSynchronize());[m
+[32m+[m		[32mDPE_POST_KERNEL();[m
+ 		std::cout << "Compute normal done\n";[m
+ 		BlackPixelUpdateWeak << <grid_size_half, block_size_half >> > (i, helper_cuda);[m
+[31m-		CUDA_SAFE_CALL(cudaDeviceSynchronize());[m
+[32m+[m		[32mDPE_POST_KERNEL();[m
+ 		RedPixelUpdateWeak << <grid_size_half, block_size_half >> > (i, helper_cuda);[m
+[31m-		CUDA_SAFE_CALL(cudaDeviceSynchronize());[m
+[32m+[m		[32mDPE_POST_KERNEL();[m
+ 		std::cout << "Iteration " << i << " -weak- done\n";[m
+ 	}[m
+ 	[m
+ 	GetDepthandNormal << <grid_size_full, block_size_full >> > (helper_cuda);[m
+[31m-	CUDA_SAFE_CALL(cudaDeviceSynchronize());[m
+[32m+[m	[32mDPE_POST_KERNEL();[m
+ [m
+ 	BlackPixelFilterStrong << <grid_size_half, block_size_half >> > (helper_cuda);[m
+[31m-	CUDA_SAFE_CALL(cudaDeviceSynchronize());[m
+[32m+[m	[32mDPE_POST_KERNEL();[m
+ 	RedPixelFilterStrong << <grid_size_half, block_size_half >> > (helper_cuda);[m
+[31m-	CUDA_SAFE_CALL(cudaDeviceSynchronize());[m
+[32m+[m	[32mDPE_POST_KERNEL();[m
+ [m
+ 	DepthToWeak << <grid_size_full, block_size_full >> > (helper_cuda);[m
+[31m-	CUDA_SAFE_CALL(cudaDeviceSynchronize());[m
+[32m+[m	[32mDPE_POST_KERNEL();[m
+ [m
+ 	LocalRefine << <grid_size_full, block_size_full >> > (helper_cuda);[m
+[31m-	CUDA_SAFE_CALL(cudaDeviceSynchronize());[m
+[32m+[m	[32mDPE_POST_KERNEL();[m
+[32m+[m	[32mCUDA_SAFE_CALL(cudaEventRecord(gpu_stop));[m
+[32m+[m	[32mCUDA_SAFE_CALL(cudaEventSynchronize(gpu_stop));[m
+[32m+[m	[32mCUDA_SAFE_CALL(cudaEventElapsedTime(&last_gpu_time_ms, gpu_start, gpu_stop));[m
+[32m+[m	[32mCUDA_SAFE_CALL(cudaEventDestroy(gpu_start));[m
+[32m+[m	[32mCUDA_SAFE_CALL(cudaEventDestroy(gpu_stop));[m
+ #ifdef DEBUG_COST_LINE[m
+ 	{[m
+ 		// export for test[m
+[36m@@ -3246,4 +3259,4 @@[m [mvoid DPE::RunPatchMatch() {[m
+ 	cudaMemcpy(weak_info_host.ptr<uchar>(0), weak_info_cuda, width * height * sizeof(uchar), cudaMemcpyDeviceToHost);[m
+ 	cudaMemcpy(selected_views_host.ptr<unsigned int>(0), selected_views_cuda, width * height * sizeof(unsigned int), cudaMemcpyDeviceToHost);[m
+ 	CUDA_SAFE_CALL(cudaDeviceSynchronize());[m
+[31m-}[m
+\ No newline at end of file[m
+[32m+[m[32m}[m
+[1mdiff --git a/DPE.h b/DPE.h[m
+[1mindex 1da305c..4296a6e 100644[m
+[1m--- a/DPE.h[m
+[1m+++ b/DPE.h[m
+[36m@@ -41,7 +41,58 @@[m [mstd::string ToFormatIndex(int index);[m
+ template <typename TYPE>[m
+ void RescaleMatToTargetSize(const cv::Mat &src, cv::Mat &dst, const cv::Size2i &target_size);[m
+ [m
+[31m-void RunFusion(const path &dense_folder, const std::vector<Problem> &problems);[m
+[32m+[m[32mstruct ViewState {[m
+[32m+[m	[32mcv::Mat depth;[m
+[32m+[m	[32mcv::Mat normal;[m
+[32m+[m	[32mcv::Mat weak;[m
+[32m+[m	[32mcv::Mat selected_views;[m
+[32m+[m[32m};[m
+[32m+[m
+[32m+[m[32mclass StateStore {[m
+[32m+[m[32mpublic:[m
+[32m+[m	[32mvoid Put(int image_id, const cv::Mat &depth, const cv::Mat &normal,[m
+[32m+[m		[32mconst cv::Mat &weak, const cv::Mat &selected_views);[m
+[32m+[m	[32mconst ViewState* Get(int image_id) const;[m
+[32m+[m	[32mbool Has(int image_id) const;[m
+[32m+[m[32mprivate:[m
+[32m+[m	[32mstd::unordered_map<int, ViewState> states_;[m
+[32m+[m[32m};[m
+[32m+[m
+[32m+[m[32mclass SceneCache {[m
+[32m+[m[32mpublic:[m
+[32m+[m	[32mexplicit SceneCache(const path &dense_folder);[m
+[32m+[m	[32mconst cv::Mat& GetGrayImage(int image_id);[m
+[32m+[m	[32mconst cv::Mat& GetGrayFloatImage(int image_id, int scale_size);[m
+[32m+[m	[32mCamera GetCamera(int image_id, int target_width, int target_height);[m
+[32m+[m	[32mvoid SetActiveScale(int scale_size);[m
+[32m+[m	[32msize_t ImageBytes() const;[m
+[32m+[m[32mprivate:[m
+[32m+[m	[32mpath image_folder_;[m
+[32m+[m	[32mpath camera_folder_;[m
+[32m+[m	[32mint active_scale_size_;[m
+[32m+[m	[32mstd::unordered_map<int, cv::Mat> gray_images_;[m
+[32m+[m	[32mstd::unordered_map<int, Camera> cameras_;[m
+[32m+[m	[32mstd::unordered_map<int, cv::Mat> active_float_images_;[m
+[32m+[m[32m};[m
+[32m+[m
+[32m+[m[32mclass GpuWorkspace {[m
+[32m+[m[32mpublic:[m
+[32m+[m	[32mGpuWorkspace();[m
+[32m+[m	[32m~GpuWorkspace();[m
+[32m+[m	[32mvoid* Acquire(size_t bytes);[m
+[32m+[m	[32mvoid Release(void *ptr);[m
+[32m+[m	[32mcudaArray* AcquireArray(int width, int height);[m
+[32m+[m	[32mvoid ReleaseArray(cudaArray *array, int width, int height);[m
+[32m+[m	[32msize_t ReservedBytes() const;[m
+[32m+[m[32mprivate:[m
+[32m+[m	[32mstd::multimap<size_t, void*> free_blocks_;[m
+[32m+[m	[32mstd::unordered_map<void*, size_t> live_blocks_;[m
+[32m+[m	[32mstd::map<std::pair<int, int>, std::vector<cudaArray*> > free_arrays_;[m
+[32m+[m	[32mstd::map<cudaArray*, std::pair<int, int> > live_arrays_;[m
+[32m+[m	[32msize_t reserved_bytes_;[m
+[32m+[m[32m};[m
+[32m+[m
+[32m+[m[32mvoid RunFusion(const path &dense_folder, const std::vector<Problem> &problems, const StateStore *state_store = nullptr);[m
+ void RunFusion_TAT_Intermediate(const path &dense_folder, const std::vector<Problem> &problems);[m
+ void RunFusion_TAT_advanced(const path &dense_folder, const std::vector<Problem> &problems);[m
+ [m
+[36m@@ -87,7 +138,8 @@[m [mstruct DataPassHelper {[m
+ [m
+ class DPE {[m
+ public:[m
+[31m-	DPE(const Problem &problem);[m
+[32m+[m	[32mDPE(const Problem &problem, SceneCache *scene_cache = nullptr,[m
+[32m+[m		[32mconst StateStore *state_store = nullptr, GpuWorkspace *gpu_workspace = nullptr);[m
+ 	~DPE();[m
+ [m
+ 	void InuputInitialization();[m
+[36m@@ -105,6 +157,7 @@[m [mpublic:[m
+ 	int GetHeight();[m
+ 	float GetDepthMin();[m
+ 	float GetDepthMax();[m
+[32m+[m	[32mfloat GetLastGpuTimeMs();[m
+ private:[m
+ 	void GenerateWeakFromImage();[m
+ [m
+[36m@@ -114,6 +167,10 @@[m [mprivate:[m
+ 	int low_width;[m
+ 	int low_height;[m
+ 	Problem problem;[m
+[32m+[m	[32mSceneCache *scene_cache;[m
+[32m+[m	[32mconst StateStore *state_store;[m
+[32m+[m	[32mGpuWorkspace *gpu_workspace;[m
+[32m+[m	[32mfloat last_gpu_time_ms;[m
+ 	// =========================[m
+ 	// image host and cuda[m
+ 	std::vector<cv::Mat> images;[m
+[36m@@ -183,4 +240,4 @@[m [mprivate:[m
+ 	float *weak_ncc_cost_cuda;[m
+ #endif // DEBUG_COST_LINE[m
+ };[m
+[31m-#endif // !_DPE_H_[m
+\ No newline at end of file[m
+[32m+[m[32m#endif // !_DPE_H_[m
+[1mdiff --git a/main.cpp b/main.cpp[m
+[1mindex 1d21279..77f80f1 100644[m
+[1m--- a/main.cpp[m
+[1m+++ b/main.cpp[m
+[36m@@ -3,6 +3,81 @@[m
+ [m
+ using namespace boost::filesystem;[m
+ [m
+[32m+[m[32menum class VisMode { NONE, FINAL, ALL };[m
+[32m+[m[32menum class CheckpointMode { NONE, FINAL, ALL };[m
+[32m+[m
+[32m+[m[32mstruct RuntimeOptions {[m
+[32m+[m	[32mint gpu_index = 0;[m
+[32m+[m	[32mVisMode vis_mode = VisMode::NONE;[m
+[32m+[m	[32mCheckpointMode checkpoint_mode = CheckpointMode::FINAL;[m
+[32m+[m	[32mbool profile = true;[m
+[32m+[m[32m};[m
+[32m+[m
+[32m+[m[32mstruct ProfileStats {[m
+[32m+[m	[32mdouble edge_ms = 0.0;[m
+[32m+[m	[32mdouble input_ms = 0.0;[m
+[32m+[m	[32mdouble support_ms = 0.0;[m
+[32m+[m	[32mdouble cuda_init_ms = 0.0;[m
+[32m+[m	[32mdouble patchmatch_ms = 0.0;[m
+[32m+[m	[32mdouble gpu_kernel_ms = 0.0;[m
+[32m+[m	[32mdouble result_ms = 0.0;[m
+[32m+[m	[32mdouble checkpoint_ms = 0.0;[m
+[32m+[m	[32mdouble fusion_ms = 0.0;[m
+[32m+[m	[32mint process_calls = 0;[m
+[32m+[m
+[32m+[m	[32mvoid Print(size_t scene_cache_bytes, size_t gpu_reserved_bytes) const {[m
+[32m+[m		[32mstd::cout << "\n[DPE Profile Summary]\n"[m
+[32m+[m			[32m<< "  process calls       : " << process_calls << "\n"[m
+[32m+[m			[32m<< "  edge precompute     : " << edge_ms / 1000.0 << " s\n"[m
+[32m+[m			[32m<< "  input/cache lookup  : " << input_ms / 1000.0 << " s\n"[m
+[32m+[m			[32m<< "  support init        : " << support_ms / 1000.0 << " s\n"[m
+[32m+[m			[32m<< "  CUDA init/upload    : " << cuda_init_ms / 1000.0 << " s\n"[m
+[32m+[m			[32m<< "  PatchMatch + D2H    : " << patchmatch_ms / 1000.0 << " s\n"[m
+[32m+[m			[32m<< "  CUDA kernels        : " << gpu_kernel_ms / 1000.0 << " s\n"[m
+[32m+[m			[32m<< "  result assembly/vis : " << result_ms / 1000.0 << " s\n"[m
+[32m+[m			[32m<< "  checkpoints         : " << checkpoint_ms / 1000.0 << " s\n"[m
+[32m+[m			[32m<< "  fusion              : " << fusion_ms / 1000.0 << " s\n"[m
+[32m+[m			[32m<< "  scene cache peak*   : " << scene_cache_bytes / (1024.0 * 1024.0) << " MiB\n"[m
+[32m+[m			[32m<< "  GPU pool reserved   : " << gpu_reserved_bytes / (1024.0 * 1024.0) << " MiB\n"[m
+[32m+[m			[32m<< "  *reported at end of the active scale\n";[m
+[32m+[m	[32m}[m
+[32m+[m[32m};[m
+[32m+[m
+[32m+[m[32mstatic double ElapsedMs(const std::chrono::steady_clock::time_point &start) {[m
+[32m+[m	[32mreturn std::chrono::duration_cast<std::chrono::duration<double, std::milli> >([m
+[32m+[m		[32mstd::chrono::steady_clock::now() - start).count();[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mstatic RuntimeOptions ParseOptions(int argc, char **argv) {[m
+[32m+[m	[32mRuntimeOptions options;[m
+[32m+[m	[32mbool gpu_set = false;[m
+[32m+[m	[32mfor (int i = 2; i < argc; ++i) {[m
+[32m+[m		[32mstd::string arg(argv[i]);[m
+[32m+[m		[32mif (arg.rfind("--vis=", 0) == 0) {[m
+[32m+[m			[32mstd::string value = arg.substr(6);[m
+[32m+[m			[32mif (value == "none") options.vis_mode = VisMode::NONE;[m
+[32m+[m			[32melse if (value == "final") options.vis_mode = VisMode::FINAL;[m
+[32m+[m			[32melse if (value == "all") options.vis_mode = VisMode::ALL;[m
+[32m+[m			[32melse throw std::runtime_error("Invalid --vis value: " + value);[m
+[32m+[m		[32m} else if (arg.rfind("--checkpoint=", 0) == 0) {[m
+[32m+[m			[32mstd::string value = arg.substr(13);[m
+[32m+[m			[32mif (value == "none") options.checkpoint_mode = CheckpointMode::NONE;[m
+[32m+[m			[32melse if (value == "final") options.checkpoint_mode = CheckpointMode::FINAL;[m
+[32m+[m			[32melse if (value == "all") options.checkpoint_mode = CheckpointMode::ALL;[m
+[32m+[m			[32melse throw std::runtime_error("Invalid --checkpoint value: " + value);[m
+[32m+[m		[32m} else if (arg.rfind("--profile=", 0) == 0) {[m
+[32m+[m			[32mstd::string value = arg.substr(10);[m
+[32m+[m			[32moptions.profile = value != "off" && value != "0";[m
+[32m+[m		[32m} else if (!gpu_set && !arg.empty() && arg[0] != '-') {[m
+[32m+[m			[32moptions.gpu_index = std::atoi(arg.c_str());[m
+[32m+[m			[32mgpu_set = true;[m
+[32m+[m		[32m} else {[m
+[32m+[m			[32mthrow std::runtime_error("Unknown option: " + arg);[m
+[32m+[m		[32m}[m
+[32m+[m	[32m}[m
+[32m+[m	[32mreturn options;[m
+[32m+[m[32m}[m
+[32m+[m
+ static void PrintProgressBar(const std::string &label, const int completed, const int total)[m
+ {[m
+ 	const int bar_width = 40;[m
+[36m@@ -61,35 +136,31 @@[m [mvoid GenerateSampleList(const path &dense_folder, std::vector<Problem> &problems[m
+ 	}[m
+ }[m
+ [m
+[31m-bool CheckImages(const std::vector<Problem> &problems) {[m
+[32m+[m[32mbool CheckImages(const std::vector<Problem> &problems, SceneCache &scene_cache) {[m
+ 	if (problems.size() == 0) {[m
+ 		return false;[m
+ 	}[m
+[31m-	path image_path = problems[0].dense_folder / path("images") / path(ToFormatIndex(problems[0].ref_image_id) + ".jpg");[m
+[31m-	cv::Mat image = cv::imread(image_path.string());[m
+[32m+[m	[32mconst cv::Mat &image = scene_cache.GetGrayImage(problems[0].ref_image_id);[m
+ 	if (image.empty()) {[m
+ 		return false;[m
+ 	}[m
+ 	const int width = image.cols;[m
+ 	const int height = image.rows;[m
+ 	for (size_t i = 1; i < problems.size(); ++i) {[m
+[31m-		image_path = problems[i].dense_folder / path("images") / path(ToFormatIndex(problems[i].ref_image_id) + ".jpg");[m
+[31m-		image = cv::imread(image_path.string());[m
+[31m-		if (image.cols != width || image.rows != height) {[m
+[32m+[m		[32mconst cv::Mat &next_image = scene_cache.GetGrayImage(problems[i].ref_image_id);[m
+[32m+[m		[32mif (next_image.cols != width || next_image.rows != height) {[m
+ 			return false;[m
+ 		}[m
+ 	}[m
+ 	return true;[m
+ }[m
+ [m
+[31m-void GetProblemEdges(const Problem &problem) {[m
+[32m+[m[32mvoid GetProblemEdges(const Problem &problem, SceneCache &scene_cache) {[m
+ 	std::cout << "Getting image edges: " << std::setw(8) << std::setfill('0') << problem.ref_image_id << "..." << std::endl;[m
+ 	int scale = 0;[m
+ 	while((1 << scale) < problem.scale_size) scale++;[m
+ [m
+[31m-	path image_folder = problem.dense_folder / path("images");[m
+[31m-	path image_path = image_folder / path(ToFormatIndex(problem.ref_image_id) + ".jpg");[m
+[31m-	cv::Mat image_uint = cv::imread(image_path.string(), cv::IMREAD_GRAYSCALE);[m
+[32m+[m	[32mcv::Mat image_uint = scene_cache.GetGrayImage(problem.ref_image_id);[m
+ 	cv::Mat src_img;[m
+ 	image_uint.convertTo(src_img, CV_32FC1);[m
+ 	const float factor = 1.0f / (float)(problem.scale_size);[m
+[36m@@ -141,12 +212,11 @@[m [mvoid GetProblemEdges(const Problem &problem) {[m
+ 	std::cout << "Getting image edges: " << std::setw(8) << std::setfill('0') << problem.ref_image_id << " done!" << std::endl;[m
+ }[m
+ [m
+[31m-int ComputeRoundNum(const std::vector<Problem> &problems) {[m
+[32m+[m[32mint ComputeRoundNum(const std::vector<Problem> &problems, SceneCache &scene_cache) {[m
+ 	if (problems.size() == 0) {[m
+ 		return 0;[m
+ 	}[m
+[31m-	path image_path = problems[0].dense_folder / path("images") / path(ToFormatIndex(problems[0].ref_image_id) + ".jpg");[m
+[31m-	cv::Mat image = cv::imread(image_path.string());[m
+[32m+[m	[32mconst cv::Mat &image = scene_cache.GetGrayImage(problems[0].ref_image_id);[m
+ 	if (image.empty()) {[m
+ 		return 0;[m
+ 	}[m
+[36m@@ -160,48 +230,63 @@[m [mint ComputeRoundNum(const std::vector<Problem> &problems) {[m
+ }[m
+ [m
+ [m
+[31m-void ProcessProblem(const Problem &problem) {[m
+[32m+[m[32mvoid ProcessProblem(const Problem &problem, SceneCache &scene_cache, StateStore &state_store,[m
+[32m+[m	[32mGpuWorkspace &gpu_workspace, ProfileStats &profile, bool write_checkpoint) {[m
+ 	std::cout << "Processing image: " << std::setw(8) << std::setfill('0') << problem.ref_image_id << "..." << std::endl;[m
+     std::cout << "iteration: " << problem.iteration << std::endl;[m
+ 	std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();[m
+ [m
+[31m-	DPE DPE(problem);[m
+[31m-	DPE.InuputInitialization();[m
+[31m-	DPE.SupportInitialization();[m
+[31m-	DPE.CudaSpaceInitialization();[m
+[31m-	DPE.SetDataPassHelperInCuda();[m
+[31m-	DPE.RunPatchMatch();[m
+[32m+[m	[32mDPE dpe(problem, &scene_cache, &state_store, &gpu_workspace);[m
+[32m+[m	[32mauto stage_start = std::chrono::steady_clock::now();[m
+[32m+[m	[32mdpe.InuputInitialization();[m
+[32m+[m	[32mprofile.input_ms += ElapsedMs(stage_start);[m
+[32m+[m	[32mstage_start = std::chrono::steady_clock::now();[m
+[32m+[m	[32mdpe.SupportInitialization();[m
+[32m+[m	[32mprofile.support_ms += ElapsedMs(stage_start);[m
+[32m+[m	[32mstage_start = std::chrono::steady_clock::now();[m
+[32m+[m	[32mdpe.CudaSpaceInitialization();[m
+[32m+[m	[32mdpe.SetDataPassHelperInCuda();[m
+[32m+[m	[32mprofile.cuda_init_ms += ElapsedMs(stage_start);[m
+[32m+[m	[32mstage_start = std::chrono::steady_clock::now();[m
+[32m+[m	[32mdpe.RunPatchMatch();[m
+[32m+[m	[32mprofile.patchmatch_ms += ElapsedMs(stage_start);[m
+[32m+[m	[32mprofile.gpu_kernel_ms += dpe.GetLastGpuTimeMs();[m
+ [m
+[31m-	int width = DPE.GetWidth(), height = DPE.GetHeight();[m
+[32m+[m	[32mstage_start = std::chrono::steady_clock::now();[m
+[32m+[m	[32mint width = dpe.GetWidth(), height = dpe.GetHeight();[m
+ 	cv::Mat depth = cv::Mat(height, width, CV_32FC1);[m
+ 	cv::Mat normal = cv::Mat(height, width, CV_32FC3);[m
+[31m-	cv::Mat pixel_states = DPE.GetPixelStates();[m
+[32m+[m	[32mcv::Mat pixel_states = dpe.GetPixelStates();[m
+ 	for (int r = 0; r < height; ++r) {[m
+ 		for (int c = 0; c < width; ++c) {[m
+[31m-			float4 plane_hypothesis = DPE.GetPlaneHypothesis(r, c);[m
+[32m+[m			[32mfloat4 plane_hypothesis = dpe.GetPlaneHypothesis(r, c);[m
+ 			depth.at<float>(r, c) = plane_hypothesis.w;[m
+[31m-			if (depth.at<float>(r, c) < DPE.GetDepthMin() || depth.at<float>(r, c) > DPE.GetDepthMax()) {[m
+[32m+[m			[32mif (depth.at<float>(r, c) < dpe.GetDepthMin() || depth.at<float>(r, c) > dpe.GetDepthMax()) {[m
+ 				depth.at<float>(r, c) = 0;[m
+ 				pixel_states.at<uchar>(r, c) = UNKNOWN;[m
+ 			}[m
+ 			normal.at<cv::Vec3f>(r, c) = cv::Vec3f(plane_hypothesis.x, plane_hypothesis.y, plane_hypothesis.z);[m
+ 		}[m
+ 	}[m
+[31m-	[m
+[31m-	path depth_path = problem.result_folder / path("depths.dmb");[m
+[31m-	WriteBinMat(depth_path, depth);[m
+[31m-	path normal_path = problem.result_folder / path("normals.dmb");[m
+[31m-	WriteBinMat(normal_path, normal);[m
+[31m-	path weak_path = problem.result_folder / path("weak.bin");[m
+[31m-	WriteBinMat(weak_path, pixel_states);[m
+[31m-	path selected_view_path = problem.result_folder / path("selected_views.bin");[m
+[31m-	WriteBinMat(selected_view_path, DPE.GetSelectedViews());[m
+[32m+[m	[32mcv::Mat selected_views = dpe.GetSelectedViews();[m
+[32m+[m	[32mstate_store.Put(problem.ref_image_id, depth, normal, pixel_states, selected_views);[m
+[32m+[m	[32mprofile.result_ms += ElapsedMs(stage_start);[m
+[32m+[m
+[32m+[m	[32mif (write_checkpoint) {[m
+[32m+[m		[32mstage_start = std::chrono::steady_clock::now();[m
+[32m+[m		[32mWriteBinMat(problem.result_folder / path("depths.dmb"), depth);[m
+[32m+[m		[32mWriteBinMat(problem.result_folder / path("normals.dmb"), normal);[m
+[32m+[m		[32mWriteBinMat(problem.result_folder / path("weak.bin"), pixel_states);[m
+[32m+[m		[32mWriteBinMat(problem.result_folder / path("selected_views.bin"), selected_views);[m
+[32m+[m		[32mprofile.checkpoint_ms += ElapsedMs(stage_start);[m
+[32m+[m	[32m}[m
+ [m
+ 	if (problem.show_medium_result) {[m
+[32m+[m		[32mstage_start = std::chrono::steady_clock::now();[m
+ 		path depth_img_path = problem.result_folder / path("depth_" + std::to_string(problem.iteration) + ".jpg");[m
+ 		path normal_img_path = problem.result_folder / path("normal_" + std::to_string(problem.iteration) + ".jpg");[m
+ 		path weak_img_path = problem.result_folder / path("weak_" + std::to_string(problem.iteration) + ".jpg");[m
+[31m-		ShowDepthMap(depth_img_path, depth, DPE.GetDepthMin(), DPE.GetDepthMax());[m
+[32m+[m		[32mShowDepthMap(depth_img_path, depth, dpe.GetDepthMin(), dpe.GetDepthMax());[m
+ 		ShowNormalMap(normal_img_path, normal);[m
+ 		ShowWeakImage(weak_img_path, pixel_states);[m
+ [m
+[36m@@ -217,50 +302,69 @@[m [mvoid ProcessProblem(const Problem &problem) {[m
+ 			// ExportDepthImagePointCloud(point_cloud_path, image_path, cam_path, depth, DPE.GetDepthMin(), DPE.GetDepthMax());[m
+ 			// remove(point_cloud_path);[m
+ 		}[m
+[32m+[m		[32mprofile.result_ms += ElapsedMs(stage_start);[m
+ 	}[m
+ 	std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();[m
+ 	std::cout << "Processing image: " << std::setw(8) << std::setfill('0') << problem.ref_image_id << " done!" << std::endl;[m
+ 	std::cout << "Cost time: " << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() << " ms" << std::endl;[m
+[32m+[m	[32mprofile.process_calls++;[m
+ }[m
+ [m
+ int main(int argc, char **argv) {[m
+ 	if (argc < 2) {[m
+[31m-		std::cerr << "USAGE: DPE dense_folder\n";[m
+[32m+[m		[32mstd::cerr << "USAGE: DPE dense_folder [gpu_index] [--vis=none|final|all] "[m
+[32m+[m			[32m<< "[--checkpoint=none|final|all] [--profile=on|off]\n";[m
+[32m+[m		[32mreturn EXIT_FAILURE;[m
+[32m+[m	[32m}[m
+[32m+[m	[32mRuntimeOptions options;[m
+[32m+[m	[32mtry {[m
+[32m+[m		[32moptions = ParseOptions(argc, argv);[m
+[32m+[m	[32m} catch (const std::exception &e) {[m
+[32m+[m		[32mstd::cerr << e.what() << "\n";[m
+ 		return EXIT_FAILURE;[m
+ 	}[m
+ 	path dense_folder(argv[1]);[m
+ 	path output_folder = dense_folder / path(OUT_NAME);[m
+ 	create_directory(output_folder);[m
+[31m-	// set cuda device for multi-gpu machine[m
+[31m-	int gpu_index = 0;[m
+[31m-	if (argc == 3) {[m
+[31m-		gpu_index = std::atoi(argv[2]);[m
+[31m-	}[m
+[31m-	cudaSetDevice(gpu_index);[m
+[32m+[m	[32mcudaSetDevice(options.gpu_index);[m
+[32m+[m	[32mstd::cout << "Runtime mode: vis="[m
+[32m+[m		[32m<< (options.vis_mode == VisMode::NONE ? "none" : options.vis_mode == VisMode::FINAL ? "final" : "all")[m
+[32m+[m		[32m<< ", checkpoint="[m
+[32m+[m		[32m<< (options.checkpoint_mode == CheckpointMode::NONE ? "none" : options.checkpoint_mode == CheckpointMode::FINAL ? "final" : "all")[m
+[32m+[m		[32m<< ", profile=" << (options.profile ? "on" : "off") << std::endl;[m
+[32m+[m
+[32m+[m	[32mSceneCache scene_cache(dense_folder);[m
+[32m+[m	[32mStateStore state_store;[m
+[32m+[m	[32mGpuWorkspace gpu_workspace;[m
+[32m+[m	[32mProfileStats profile;[m
+ 	// generate problems[m
+ 	std::vector<Problem> problems;[m
+ 	GenerateSampleList(dense_folder, problems);[m
+[31m-	if (!CheckImages(problems)) {[m
+[32m+[m	[32mif (!CheckImages(problems, scene_cache)) {[m
+ 		std::cerr << "Images may error, check it!\n";[m
+ 		return EXIT_FAILURE;[m
+ 	}[m
+ 	int num_images = problems.size();[m
+ 	std::cout << "There are " << num_images << " problems needed to be processed!" << std::endl;[m
+ [m
+[31m-	int round_num = ComputeRoundNum(problems);[m
+[32m+[m	[32mint round_num = ComputeRoundNum(problems, scene_cache);[m
+ 	const int total_edge_steps = round_num * num_images;[m
+ 	int completed_edge_steps = 0;[m
+ 	PrintProgressBar("edge precompute", completed_edge_steps, total_edge_steps);[m
+[31m-	for (auto &problem : problems) {[m
+[31m-		problem.params.max_scale_size = 1;[m
+[31m-		for (int i = 0; i < round_num; ++i) {[m
+[31m-			problem.scale_size = static_cast<int>(std::pow(2, round_num - 1 - i)); // scale [m
+[31m-			GetProblemEdges(problem); // 注意要先得到 scale_size[m
+[31m-			problem.params.max_scale_size = MAX(problem.scale_size, problem.params.max_scale_size);[m
+[32m+[m	[32mconst int max_scale_size = static_cast<int>(std::pow(2, round_num - 1));[m
+[32m+[m	[32mfor (auto &problem : problems) problem.params.max_scale_size = max_scale_size;[m
+[32m+[m	[32mauto edge_start = std::chrono::steady_clock::now();[m
+[32m+[m	[32mfor (int i = 0; i < round_num; ++i) {[m
+[32m+[m		[32mconst int scale_size = static_cast<int>(std::pow(2, round_num - 1 - i));[m
+[32m+[m		[32mfor (auto &problem : problems) {[m
+[32m+[m			[32mproblem.scale_size = scale_size;[m
+[32m+[m			[32mproblem.show_medium_result = options.vis_mode == VisMode::ALL;[m
+[32m+[m			[32mGetProblemEdges(problem, scene_cache);[m
+ 			completed_edge_steps++;[m
+ 			PrintProgressBar("edge precompute", completed_edge_steps, total_edge_steps);[m
+ 		}[m
+ 	}[m
+[32m+[m	[32mprofile.edge_ms += ElapsedMs(edge_start);[m
+ [m
+ 	std::cout << "Round nums: " << round_num << std::endl;[m
+ 	int iteration_index = 0;[m
+[36m@@ -268,10 +372,13 @@[m [mint main(int argc, char **argv) {[m
+ 	int completed_patchmatch_steps = 0;[m
+ 	PrintProgressBar("patchmatch", completed_patchmatch_steps, total_patchmatch_steps);[m
+ 	for (int i = 0; i < round_num; ++i) {[m
+[32m+[m		[32mconst int scale_size = static_cast<int>(std::pow(2, round_num - 1 - i));[m
+[32m+[m		[32mscene_cache.SetActiveScale(scale_size);[m
+ 		for (auto &problem : problems) {[m
+ 			problem.iteration = iteration_index;[m
+[31m-			problem.scale_size = static_cast<int>(std::pow(2, round_num - 1 - i)); // scale [m
+[32m+[m			[32mproblem.scale_size = scale_size;[m
+ 			problem.params.scale_size = problem.scale_size;[m
+[32m+[m			[32mproblem.show_medium_result = options.vis_mode == VisMode::ALL;[m
+ 			{[m
+ 				auto &params = problem.params;[m
+ 				if (i == 0) {[m
+[36m@@ -289,7 +396,8 @@[m [mint main(int argc, char **argv) {[m
+ 				params.max_iterations = 3;[m
+ 				params.weak_peak_radius = 6;[m
+ 			}[m
+[31m-			ProcessProblem(problem);[m
+[32m+[m			[32mconst bool write_checkpoint = options.checkpoint_mode == CheckpointMode::ALL;[m
+[32m+[m			[32mProcessProblem(problem, scene_cache, state_store, gpu_workspace, profile, write_checkpoint);[m
+ 			completed_patchmatch_steps++;[m
+ 			PrintProgressBar("patchmatch round " + std::to_string(i + 1) + "/" + std::to_string(round_num) + " init",[m
+ 				completed_patchmatch_steps, total_patchmatch_steps);[m
+[36m@@ -298,8 +406,11 @@[m [mint main(int argc, char **argv) {[m
+ 		for (int j = 0; j < 3; ++j) {[m
+ 			for (auto &problem : problems) {[m
+ 				problem.iteration = iteration_index;[m
+[31m-				problem.scale_size = static_cast<int>(std::pow(2, round_num - 1 - i)); // scale [m
+[32m+[m				[32mproblem.scale_size = scale_size;[m
+ 				problem.params.scale_size = problem.scale_size;[m
+[32m+[m				[32mconst bool final_call = i == round_num - 1 && j == 2;[m
+[32m+[m				[32mproblem.show_medium_result = options.vis_mode == VisMode::ALL ||[m
+[32m+[m					[32m(options.vis_mode == VisMode::FINAL && final_call);[m
+ 				{[m
+ 					auto &params = problem.params;[m
+ 					params.state = REFINE_ITER;[m
+[36m@@ -316,7 +427,9 @@[m [mint main(int argc, char **argv) {[m
+ 					params.max_iterations = 3;[m
+ 					params.weak_peak_radius = MAX(4 - 2 * j, 2);[m
+ 				}[m
+[31m-				ProcessProblem(problem);[m
+[32m+[m				[32mconst bool write_checkpoint = options.checkpoint_mode == CheckpointMode::ALL ||[m
+[32m+[m					[32m(options.checkpoint_mode == CheckpointMode::FINAL && final_call);[m
+[32m+[m				[32mProcessProblem(problem, scene_cache, state_store, gpu_workspace, profile, write_checkpoint);[m
+ 				completed_patchmatch_steps++;[m
+ 				PrintProgressBar("patchmatch round " + std::to_string(i + 1) + "/" + std::to_string(round_num)[m
+ 					+ " refine " + std::to_string(j + 1) + "/3",[m
+[36m@@ -328,22 +441,10 @@[m [mint main(int argc, char **argv) {[m
+ 	}[m
+ [m
+ 	std::cout << "[DPE Progress] patchmatch done; starting fusion" << std::endl;[m
+[31m-	RunFusion(dense_folder, problems);[m
+[31m-	{// delete files[m
+[31m-		for (size_t i = 0; i < problems.size(); ++i) {[m
+[31m-			const auto &problem = problems[i];[m
+[31m-			remove(problem.result_folder / path("weak.bin"));[m
+[31m-			remove(problem.result_folder / path("depths.dmb"));[m
+[31m-			remove(problem.result_folder / path("normals.dmb"));[m
+[31m-			remove(problem.result_folder / path("selected_views.bin"));[m
+[31m-			remove(problem.result_folder / path("neighbour.bin")); [m
+[31m-			remove(problem.result_folder / path("neighbour_map.bin"));[m
+[31m-			for (int j = 0; j < round_num; j++) {[m
+[31m-				remove(problem.result_folder / path("edges_" + std::to_string(j) + ".dmb"));[m
+[31m-				remove(problem.result_folder / path("labels_" + std::to_string(j) + ".dmb"));[m
+[31m-			}[m
+[31m-		}[m
+[31m-	}[m
+[32m+[m	[32mauto fusion_start = std::chrono::steady_clock::now();[m
+[32m+[m	[32mRunFusion(dense_folder, problems, &state_store);[m
+[32m+[m	[32mprofile.fusion_ms += ElapsedMs(fusion_start);[m
+[32m+[m	[32mif (options.profile) profile.Print(scene_cache.ImageBytes(), gpu_workspace.ReservedBytes());[m
+ 	std::cout << "All done\n";[m
+ 	return EXIT_SUCCESS;[m
+ }[m
+[1mdiff --git a/main.h b/main.h[m
+[1mindex eb302df..f6d953b 100644[m
+[1m--- a/main.h[m
+[1m+++ b/main.h[m
+[36m@@ -30,6 +30,8 @@[m
+ #include <cstdarg>[m
+ #include <random>[m
+ #include <unordered_map>[m
+[32m+[m[32m#include <set>[m
+[32m+[m[32m#include <stdexcept>[m
+ // Includes Boost filesystem[m
+ #include <boost/filesystem.hpp>[m
+ #include <boost/filesystem/fstream.hpp>[m
+[36m@@ -114,7 +116,7 @@[m [mstruct Problem {[m
+ 	path result_folder;[m
+ 	int scale_size = 1;[m
+ 	PatchMatchParams params;[m
+[31m-	bool show_medium_result = true;[m
+[32m+[m	[32mbool show_medium_result = false;[m
+ 	int iteration;[m
+ };[m
+ [m

@@ -3,6 +3,81 @@
 
 using namespace boost::filesystem;
 
+enum class VisMode { NONE, FINAL, ALL };
+enum class CheckpointMode { NONE, FINAL, ALL };
+
+struct RuntimeOptions {
+	int gpu_index = 0;
+	VisMode vis_mode = VisMode::NONE;
+	CheckpointMode checkpoint_mode = CheckpointMode::FINAL;
+	bool profile = true;
+};
+
+struct ProfileStats {
+	double edge_ms = 0.0;
+	double input_ms = 0.0;
+	double support_ms = 0.0;
+	double cuda_init_ms = 0.0;
+	double patchmatch_ms = 0.0;
+	double gpu_kernel_ms = 0.0;
+	double result_ms = 0.0;
+	double checkpoint_ms = 0.0;
+	double fusion_ms = 0.0;
+	int process_calls = 0;
+
+	void Print(size_t scene_cache_bytes, size_t gpu_reserved_bytes) const {
+		std::cout << "\n[DPE Profile Summary]\n"
+			<< "  process calls       : " << process_calls << "\n"
+			<< "  edge precompute     : " << edge_ms / 1000.0 << " s\n"
+			<< "  input/cache lookup  : " << input_ms / 1000.0 << " s\n"
+			<< "  support init        : " << support_ms / 1000.0 << " s\n"
+			<< "  CUDA init/upload    : " << cuda_init_ms / 1000.0 << " s\n"
+			<< "  PatchMatch + D2H    : " << patchmatch_ms / 1000.0 << " s\n"
+			<< "  CUDA kernels        : " << gpu_kernel_ms / 1000.0 << " s\n"
+			<< "  result assembly/vis : " << result_ms / 1000.0 << " s\n"
+			<< "  checkpoints         : " << checkpoint_ms / 1000.0 << " s\n"
+			<< "  fusion              : " << fusion_ms / 1000.0 << " s\n"
+			<< "  scene cache peak*   : " << scene_cache_bytes / (1024.0 * 1024.0) << " MiB\n"
+			<< "  GPU pool reserved   : " << gpu_reserved_bytes / (1024.0 * 1024.0) << " MiB\n"
+			<< "  *reported at end of the active scale\n";
+	}
+};
+
+static double ElapsedMs(const std::chrono::steady_clock::time_point &start) {
+	return std::chrono::duration_cast<std::chrono::duration<double, std::milli> >(
+		std::chrono::steady_clock::now() - start).count();
+}
+
+static RuntimeOptions ParseOptions(int argc, char **argv) {
+	RuntimeOptions options;
+	bool gpu_set = false;
+	for (int i = 2; i < argc; ++i) {
+		std::string arg(argv[i]);
+		if (arg.rfind("--vis=", 0) == 0) {
+			std::string value = arg.substr(6);
+			if (value == "none") options.vis_mode = VisMode::NONE;
+			else if (value == "final") options.vis_mode = VisMode::FINAL;
+			else if (value == "all") options.vis_mode = VisMode::ALL;
+			else throw std::runtime_error("Invalid --vis value: " + value);
+		} else if (arg.rfind("--checkpoint=", 0) == 0) {
+			std::string value = arg.substr(13);
+			if (value == "none") options.checkpoint_mode = CheckpointMode::NONE;
+			else if (value == "final") options.checkpoint_mode = CheckpointMode::FINAL;
+			else if (value == "all") options.checkpoint_mode = CheckpointMode::ALL;
+			else throw std::runtime_error("Invalid --checkpoint value: " + value);
+		} else if (arg.rfind("--profile=", 0) == 0) {
+			std::string value = arg.substr(10);
+			options.profile = value != "off" && value != "0";
+		} else if (!gpu_set && !arg.empty() && arg[0] != '-') {
+			options.gpu_index = std::atoi(arg.c_str());
+			gpu_set = true;
+		} else {
+			throw std::runtime_error("Unknown option: " + arg);
+		}
+	}
+	return options;
+}
+
 static void PrintProgressBar(const std::string &label, const int completed, const int total)
 {
 	const int bar_width = 40;
@@ -61,35 +136,31 @@ void GenerateSampleList(const path &dense_folder, std::vector<Problem> &problems
 	}
 }
 
-bool CheckImages(const std::vector<Problem> &problems) {
+bool CheckImages(const std::vector<Problem> &problems, SceneCache &scene_cache) {
 	if (problems.size() == 0) {
 		return false;
 	}
-	path image_path = problems[0].dense_folder / path("images") / path(ToFormatIndex(problems[0].ref_image_id) + ".jpg");
-	cv::Mat image = cv::imread(image_path.string());
+	const cv::Mat &image = scene_cache.GetGrayImage(problems[0].ref_image_id);
 	if (image.empty()) {
 		return false;
 	}
 	const int width = image.cols;
 	const int height = image.rows;
 	for (size_t i = 1; i < problems.size(); ++i) {
-		image_path = problems[i].dense_folder / path("images") / path(ToFormatIndex(problems[i].ref_image_id) + ".jpg");
-		image = cv::imread(image_path.string());
-		if (image.cols != width || image.rows != height) {
+		const cv::Mat &next_image = scene_cache.GetGrayImage(problems[i].ref_image_id);
+		if (next_image.cols != width || next_image.rows != height) {
 			return false;
 		}
 	}
 	return true;
 }
 
-void GetProblemEdges(const Problem &problem) {
+void GetProblemEdges(const Problem &problem, SceneCache &scene_cache) {
 	std::cout << "Getting image edges: " << std::setw(8) << std::setfill('0') << problem.ref_image_id << "..." << std::endl;
 	int scale = 0;
 	while((1 << scale) < problem.scale_size) scale++;
 
-	path image_folder = problem.dense_folder / path("images");
-	path image_path = image_folder / path(ToFormatIndex(problem.ref_image_id) + ".jpg");
-	cv::Mat image_uint = cv::imread(image_path.string(), cv::IMREAD_GRAYSCALE);
+	cv::Mat image_uint = scene_cache.GetGrayImage(problem.ref_image_id);
 	cv::Mat src_img;
 	image_uint.convertTo(src_img, CV_32FC1);
 	const float factor = 1.0f / (float)(problem.scale_size);
@@ -141,12 +212,11 @@ void GetProblemEdges(const Problem &problem) {
 	std::cout << "Getting image edges: " << std::setw(8) << std::setfill('0') << problem.ref_image_id << " done!" << std::endl;
 }
 
-int ComputeRoundNum(const std::vector<Problem> &problems) {
+int ComputeRoundNum(const std::vector<Problem> &problems, SceneCache &scene_cache) {
 	if (problems.size() == 0) {
 		return 0;
 	}
-	path image_path = problems[0].dense_folder / path("images") / path(ToFormatIndex(problems[0].ref_image_id) + ".jpg");
-	cv::Mat image = cv::imread(image_path.string());
+	const cv::Mat &image = scene_cache.GetGrayImage(problems[0].ref_image_id);
 	if (image.empty()) {
 		return 0;
 	}
@@ -160,48 +230,63 @@ int ComputeRoundNum(const std::vector<Problem> &problems) {
 }
 
 
-void ProcessProblem(const Problem &problem) {
+void ProcessProblem(const Problem &problem, SceneCache &scene_cache, StateStore &state_store,
+	GpuWorkspace &gpu_workspace, ProfileStats &profile, bool write_checkpoint) {
 	std::cout << "Processing image: " << std::setw(8) << std::setfill('0') << problem.ref_image_id << "..." << std::endl;
     std::cout << "iteration: " << problem.iteration << std::endl;
 	std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
 
-	DPE DPE(problem);
-	DPE.InuputInitialization();
-	DPE.SupportInitialization();
-	DPE.CudaSpaceInitialization();
-	DPE.SetDataPassHelperInCuda();
-	DPE.RunPatchMatch();
+	DPE dpe(problem, &scene_cache, &state_store, &gpu_workspace);
+	auto stage_start = std::chrono::steady_clock::now();
+	dpe.InuputInitialization();
+	profile.input_ms += ElapsedMs(stage_start);
+	stage_start = std::chrono::steady_clock::now();
+	dpe.SupportInitialization();
+	profile.support_ms += ElapsedMs(stage_start);
+	stage_start = std::chrono::steady_clock::now();
+	dpe.CudaSpaceInitialization();
+	dpe.SetDataPassHelperInCuda();
+	profile.cuda_init_ms += ElapsedMs(stage_start);
+	stage_start = std::chrono::steady_clock::now();
+	dpe.RunPatchMatch();
+	profile.patchmatch_ms += ElapsedMs(stage_start);
+	profile.gpu_kernel_ms += dpe.GetLastGpuTimeMs();
 
-	int width = DPE.GetWidth(), height = DPE.GetHeight();
+	stage_start = std::chrono::steady_clock::now();
+	int width = dpe.GetWidth(), height = dpe.GetHeight();
 	cv::Mat depth = cv::Mat(height, width, CV_32FC1);
 	cv::Mat normal = cv::Mat(height, width, CV_32FC3);
-	cv::Mat pixel_states = DPE.GetPixelStates();
+	cv::Mat pixel_states = dpe.GetPixelStates();
 	for (int r = 0; r < height; ++r) {
 		for (int c = 0; c < width; ++c) {
-			float4 plane_hypothesis = DPE.GetPlaneHypothesis(r, c);
+			float4 plane_hypothesis = dpe.GetPlaneHypothesis(r, c);
 			depth.at<float>(r, c) = plane_hypothesis.w;
-			if (depth.at<float>(r, c) < DPE.GetDepthMin() || depth.at<float>(r, c) > DPE.GetDepthMax()) {
+			if (depth.at<float>(r, c) < dpe.GetDepthMin() || depth.at<float>(r, c) > dpe.GetDepthMax()) {
 				depth.at<float>(r, c) = 0;
 				pixel_states.at<uchar>(r, c) = UNKNOWN;
 			}
 			normal.at<cv::Vec3f>(r, c) = cv::Vec3f(plane_hypothesis.x, plane_hypothesis.y, plane_hypothesis.z);
 		}
 	}
-	
-	path depth_path = problem.result_folder / path("depths.dmb");
-	WriteBinMat(depth_path, depth);
-	path normal_path = problem.result_folder / path("normals.dmb");
-	WriteBinMat(normal_path, normal);
-	path weak_path = problem.result_folder / path("weak.bin");
-	WriteBinMat(weak_path, pixel_states);
-	path selected_view_path = problem.result_folder / path("selected_views.bin");
-	WriteBinMat(selected_view_path, DPE.GetSelectedViews());
+	cv::Mat selected_views = dpe.GetSelectedViews();
+	state_store.Put(problem.ref_image_id, depth, normal, pixel_states, selected_views);
+	profile.result_ms += ElapsedMs(stage_start);
+
+	if (write_checkpoint) {
+		stage_start = std::chrono::steady_clock::now();
+		WriteBinMat(problem.result_folder / path("depths.dmb"), depth);
+		WriteBinMat(problem.result_folder / path("normals.dmb"), normal);
+		WriteBinMat(problem.result_folder / path("weak.bin"), pixel_states);
+		WriteBinMat(problem.result_folder / path("selected_views.bin"), selected_views);
+		profile.checkpoint_ms += ElapsedMs(stage_start);
+	}
 
 	if (problem.show_medium_result) {
+		stage_start = std::chrono::steady_clock::now();
 		path depth_img_path = problem.result_folder / path("depth_" + std::to_string(problem.iteration) + ".jpg");
 		path normal_img_path = problem.result_folder / path("normal_" + std::to_string(problem.iteration) + ".jpg");
 		path weak_img_path = problem.result_folder / path("weak_" + std::to_string(problem.iteration) + ".jpg");
-		ShowDepthMap(depth_img_path, depth, DPE.GetDepthMin(), DPE.GetDepthMax());
+		ShowDepthMap(depth_img_path, depth, dpe.GetDepthMin(), dpe.GetDepthMax());
 		ShowNormalMap(normal_img_path, normal);
 		ShowWeakImage(weak_img_path, pixel_states);
 
@@ -217,50 +302,69 @@ void ProcessProblem(const Problem &problem) {
 			// ExportDepthImagePointCloud(point_cloud_path, image_path, cam_path, depth, DPE.GetDepthMin(), DPE.GetDepthMax());
 			// remove(point_cloud_path);
 		}
+		profile.result_ms += ElapsedMs(stage_start);
 	}
 	std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
 	std::cout << "Processing image: " << std::setw(8) << std::setfill('0') << problem.ref_image_id << " done!" << std::endl;
 	std::cout << "Cost time: " << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() << " ms" << std::endl;
+	profile.process_calls++;
 }
 
 int main(int argc, char **argv) {
 	if (argc < 2) {
-		std::cerr << "USAGE: DPE dense_folder\n";
+		std::cerr << "USAGE: DPE dense_folder [gpu_index] [--vis=none|final|all] "
+			<< "[--checkpoint=none|final|all] [--profile=on|off]\n";
+		return EXIT_FAILURE;
+	}
+	RuntimeOptions options;
+	try {
+		options = ParseOptions(argc, argv);
+	} catch (const std::exception &e) {
+		std::cerr << e.what() << "\n";
 		return EXIT_FAILURE;
 	}
 	path dense_folder(argv[1]);
 	path output_folder = dense_folder / path(OUT_NAME);
 	create_directory(output_folder);
-	// set cuda device for multi-gpu machine
-	int gpu_index = 0;
-	if (argc == 3) {
-		gpu_index = std::atoi(argv[2]);
-	}
-	cudaSetDevice(gpu_index);
+	cudaSetDevice(options.gpu_index);
+	std::cout << "Runtime mode: vis="
+		<< (options.vis_mode == VisMode::NONE ? "none" : options.vis_mode == VisMode::FINAL ? "final" : "all")
+		<< ", checkpoint="
+		<< (options.checkpoint_mode == CheckpointMode::NONE ? "none" : options.checkpoint_mode == CheckpointMode::FINAL ? "final" : "all")
+		<< ", profile=" << (options.profile ? "on" : "off") << std::endl;
+
+	SceneCache scene_cache(dense_folder);
+	StateStore state_store;
+	GpuWorkspace gpu_workspace;
+	ProfileStats profile;
 	// generate problems
 	std::vector<Problem> problems;
 	GenerateSampleList(dense_folder, problems);
-	if (!CheckImages(problems)) {
+	if (!CheckImages(problems, scene_cache)) {
 		std::cerr << "Images may error, check it!\n";
 		return EXIT_FAILURE;
 	}
 	int num_images = problems.size();
 	std::cout << "There are " << num_images << " problems needed to be processed!" << std::endl;
 
-	int round_num = ComputeRoundNum(problems);
+	int round_num = ComputeRoundNum(problems, scene_cache);
 	const int total_edge_steps = round_num * num_images;
 	int completed_edge_steps = 0;
 	PrintProgressBar("edge precompute", completed_edge_steps, total_edge_steps);
-	for (auto &problem : problems) {
-		problem.params.max_scale_size = 1;
-		for (int i = 0; i < round_num; ++i) {
-			problem.scale_size = static_cast<int>(std::pow(2, round_num - 1 - i)); // scale 
-			GetProblemEdges(problem); // 注意要先得到 scale_size
-			problem.params.max_scale_size = MAX(problem.scale_size, problem.params.max_scale_size);
+	const int max_scale_size = static_cast<int>(std::pow(2, round_num - 1));
+	for (auto &problem : problems) problem.params.max_scale_size = max_scale_size;
+	auto edge_start = std::chrono::steady_clock::now();
+	for (int i = 0; i < round_num; ++i) {
+		const int scale_size = static_cast<int>(std::pow(2, round_num - 1 - i));
+		for (auto &problem : problems) {
+			problem.scale_size = scale_size;
+			problem.show_medium_result = options.vis_mode == VisMode::ALL;
+			GetProblemEdges(problem, scene_cache);
 			completed_edge_steps++;
 			PrintProgressBar("edge precompute", completed_edge_steps, total_edge_steps);
 		}
 	}
+	profile.edge_ms += ElapsedMs(edge_start);
 
 	std::cout << "Round nums: " << round_num << std::endl;
 	int iteration_index = 0;
@@ -268,10 +372,13 @@ int main(int argc, char **argv) {
 	int completed_patchmatch_steps = 0;
 	PrintProgressBar("patchmatch", completed_patchmatch_steps, total_patchmatch_steps);
 	for (int i = 0; i < round_num; ++i) {
+		const int scale_size = static_cast<int>(std::pow(2, round_num - 1 - i));
+		scene_cache.SetActiveScale(scale_size);
 		for (auto &problem : problems) {
 			problem.iteration = iteration_index;
-			problem.scale_size = static_cast<int>(std::pow(2, round_num - 1 - i)); // scale 
+			problem.scale_size = scale_size;
 			problem.params.scale_size = problem.scale_size;
+			problem.show_medium_result = options.vis_mode == VisMode::ALL;
 			{
 				auto &params = problem.params;
 				if (i == 0) {
@@ -289,7 +396,8 @@ int main(int argc, char **argv) {
 				params.max_iterations = 3;
 				params.weak_peak_radius = 6;
 			}
-			ProcessProblem(problem);
+			const bool write_checkpoint = options.checkpoint_mode == CheckpointMode::ALL;
+			ProcessProblem(problem, scene_cache, state_store, gpu_workspace, profile, write_checkpoint);
 			completed_patchmatch_steps++;
 			PrintProgressBar("patchmatch round " + std::to_string(i + 1) + "/" + std::to_string(round_num) + " init",
 				completed_patchmatch_steps, total_patchmatch_steps);
@@ -298,8 +406,11 @@ int main(int argc, char **argv) {
 		for (int j = 0; j < 3; ++j) {
 			for (auto &problem : problems) {
 				problem.iteration = iteration_index;
-				problem.scale_size = static_cast<int>(std::pow(2, round_num - 1 - i)); // scale 
+				problem.scale_size = scale_size;
 				problem.params.scale_size = problem.scale_size;
+				const bool final_call = i == round_num - 1 && j == 2;
+				problem.show_medium_result = options.vis_mode == VisMode::ALL ||
+					(options.vis_mode == VisMode::FINAL && final_call);
 				{
 					auto &params = problem.params;
 					params.state = REFINE_ITER;
@@ -316,7 +427,9 @@ int main(int argc, char **argv) {
 					params.max_iterations = 3;
 					params.weak_peak_radius = MAX(4 - 2 * j, 2);
 				}
-				ProcessProblem(problem);
+				const bool write_checkpoint = options.checkpoint_mode == CheckpointMode::ALL ||
+					(options.checkpoint_mode == CheckpointMode::FINAL && final_call);
+				ProcessProblem(problem, scene_cache, state_store, gpu_workspace, profile, write_checkpoint);
 				completed_patchmatch_steps++;
 				PrintProgressBar("patchmatch round " + std::to_string(i + 1) + "/" + std::to_string(round_num)
 					+ " refine " + std::to_string(j + 1) + "/3",
@@ -328,22 +441,10 @@ int main(int argc, char **argv) {
 	}
 
 	std::cout << "[DPE Progress] patchmatch done; starting fusion" << std::endl;
-	RunFusion(dense_folder, problems);
-	{// delete files
-		for (size_t i = 0; i < problems.size(); ++i) {
-			const auto &problem = problems[i];
-			remove(problem.result_folder / path("weak.bin"));
-			remove(problem.result_folder / path("depths.dmb"));
-			remove(problem.result_folder / path("normals.dmb"));
-			remove(problem.result_folder / path("selected_views.bin"));
-			remove(problem.result_folder / path("neighbour.bin")); 
-			remove(problem.result_folder / path("neighbour_map.bin"));
-			for (int j = 0; j < round_num; j++) {
-				remove(problem.result_folder / path("edges_" + std::to_string(j) + ".dmb"));
-				remove(problem.result_folder / path("labels_" + std::to_string(j) + ".dmb"));
-			}
-		}
-	}
+	auto fusion_start = std::chrono::steady_clock::now();
+	RunFusion(dense_folder, problems, &state_store);
+	profile.fusion_ms += ElapsedMs(fusion_start);
+	if (options.profile) profile.Print(scene_cache.ImageBytes(), gpu_workspace.ReservedBytes());
 	std::cout << "All done\n";
 	return EXIT_SUCCESS;
 }

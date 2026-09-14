@@ -1,6 +1,10 @@
 #include "DPE.h"
 
-#define DEBUG_COMPLEX
+#ifdef DPE_DEBUG_SYNC
+#define DPE_POST_KERNEL() CUDA_SAFE_CALL(cudaDeviceSynchronize())
+#else
+#define DPE_POST_KERNEL() CUDA_SAFE_CALL(cudaPeekAtLastError())
+#endif
 
 __device__  void sort_small(float *d, const int n)
 {
@@ -3125,6 +3129,9 @@ __global__ void RANSACToGetFitPlane(DataPassHelper *helper) {
 
 void DPE::RunPatchMatch() {
 	std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+	cudaEvent_t gpu_start, gpu_stop;
+	CUDA_SAFE_CALL(cudaEventCreate(&gpu_start));
+	CUDA_SAFE_CALL(cudaEventCreate(&gpu_stop));
 
 	int BLOCK_W = 32;
 	int BLOCK_H = (BLOCK_W / 2);
@@ -3147,12 +3154,13 @@ void DPE::RunPatchMatch() {
 	block_size_half.y = BLOCK_H;
 	block_size_half.z = 1;
 
+	CUDA_SAFE_CALL(cudaEventRecord(gpu_start));
 	InitRandomStates << <grid_size_full, block_size_full >> >(helper_cuda);
-	CUDA_SAFE_CALL(cudaDeviceSynchronize());
+	DPE_POST_KERNEL();
 
 	GenEdgeInform << <grid_size_full, block_size_full >> > (helper_cuda);
-	CUDA_SAFE_CALL(cudaDeviceSynchronize());
-#ifdef DEBUG_COMPLEX
+	DPE_POST_KERNEL();
+#ifdef DPE_DEBUG_COMPLEX
 	path complex_path = problem.result_folder / path("complex.jpg");
 	cv::Mat complex_host(height, width, CV_32F);
 	cudaMemcpy(complex_host.ptr<float>(0), complex_cuda, width * height * sizeof(float), cudaMemcpyDeviceToHost);
@@ -3163,13 +3171,13 @@ void DPE::RunPatchMatch() {
 #endif
 
 	FindNearestStrongPoint << <grid_size_full, block_size_full >> >(helper_cuda);
-	CUDA_SAFE_CALL(cudaDeviceSynchronize());
+	DPE_POST_KERNEL();
 
 	GenNeighbours << <grid_size_full, block_size_full >> > (helper_cuda);
-	CUDA_SAFE_CALL(cudaDeviceSynchronize());
+	DPE_POST_KERNEL();
 
 	NeigbourUpdate << <grid_size_full, block_size_full >> > (helper_cuda);
-	CUDA_SAFE_CALL(cudaDeviceSynchronize());
+	DPE_POST_KERNEL();
 	
 	if (problem.show_medium_result) { // write neighbour for visualization
 #ifdef DEBUG_NEIGHBOUR
@@ -3193,37 +3201,42 @@ void DPE::RunPatchMatch() {
 	std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
 	std::cout << "Generate neighbours done. Cost time: " << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() << " ms" << std::endl;
 	RandomInitialization << <grid_size_full, block_size_full >> > (helper_cuda);
-	CUDA_SAFE_CALL(cudaDeviceSynchronize());
+	DPE_POST_KERNEL();
 
 	for (int i = 0; i < params_host.max_iterations; ++i) {
 		BlackPixelUpdateStrong << <grid_size_half, block_size_half >> > (i, helper_cuda);
-		CUDA_SAFE_CALL(cudaDeviceSynchronize());
+		DPE_POST_KERNEL();
 		RedPixelUpdateStrong << <grid_size_half, block_size_half >> > (i, helper_cuda);
-		CUDA_SAFE_CALL(cudaDeviceSynchronize());
+		DPE_POST_KERNEL();
 		std::cout << "Iteration " << i << " strong done\n";
 		RANSACToGetFitPlane << <grid_size_full, block_size_full >> > (helper_cuda);
-		CUDA_SAFE_CALL(cudaDeviceSynchronize());
+		DPE_POST_KERNEL();
 		std::cout << "Compute normal done\n";
 		BlackPixelUpdateWeak << <grid_size_half, block_size_half >> > (i, helper_cuda);
-		CUDA_SAFE_CALL(cudaDeviceSynchronize());
+		DPE_POST_KERNEL();
 		RedPixelUpdateWeak << <grid_size_half, block_size_half >> > (i, helper_cuda);
-		CUDA_SAFE_CALL(cudaDeviceSynchronize());
+		DPE_POST_KERNEL();
 		std::cout << "Iteration " << i << " -weak- done\n";
 	}
 	
 	GetDepthandNormal << <grid_size_full, block_size_full >> > (helper_cuda);
-	CUDA_SAFE_CALL(cudaDeviceSynchronize());
+	DPE_POST_KERNEL();
 
 	BlackPixelFilterStrong << <grid_size_half, block_size_half >> > (helper_cuda);
-	CUDA_SAFE_CALL(cudaDeviceSynchronize());
+	DPE_POST_KERNEL();
 	RedPixelFilterStrong << <grid_size_half, block_size_half >> > (helper_cuda);
-	CUDA_SAFE_CALL(cudaDeviceSynchronize());
+	DPE_POST_KERNEL();
 
 	DepthToWeak << <grid_size_full, block_size_full >> > (helper_cuda);
-	CUDA_SAFE_CALL(cudaDeviceSynchronize());
+	DPE_POST_KERNEL();
 
 	LocalRefine << <grid_size_full, block_size_full >> > (helper_cuda);
-	CUDA_SAFE_CALL(cudaDeviceSynchronize());
+	DPE_POST_KERNEL();
+	CUDA_SAFE_CALL(cudaEventRecord(gpu_stop));
+	CUDA_SAFE_CALL(cudaEventSynchronize(gpu_stop));
+	CUDA_SAFE_CALL(cudaEventElapsedTime(&last_gpu_time_ms, gpu_start, gpu_stop));
+	CUDA_SAFE_CALL(cudaEventDestroy(gpu_start));
+	CUDA_SAFE_CALL(cudaEventDestroy(gpu_stop));
 #ifdef DEBUG_COST_LINE
 	{
 		// export for test

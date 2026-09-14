@@ -4,6 +4,9 @@ SET(CMAKE_CXX_COMPILER /usr/bin/g++)
 cmake_minimum_required (VERSION 2.8)
 project (DPE)
 
+option(DPE_DEBUG_SYNC "Synchronize after every CUDA kernel launch" OFF)
+option(DPE_DEBUG_COMPLEX "Download and save complex.jpg after edge analysis" OFF)
+
 set(Boost_USE_STATIC_LIBS ON)
 set(Boost_USE_MULTITHREADED ON)
 set(Boost_USE_STATIC_RUNTIME OFF)
@@ -21,6 +24,13 @@ ${Boost_INCLUDE_DIRS})
 include_directories(.)
 
 set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS};-O3 --use_fast_math --maxrregcount=128 --ptxas-options=-v -std=c++14 --compiler-options -Wall -gencode arch=compute_86,code=sm_86)
+
+if(DPE_DEBUG_SYNC)
+    add_definitions(-DDPE_DEBUG_SYNC)
+endif()
+if(DPE_DEBUG_COMPLEX)
+    add_definitions(-DDPE_DEBUG_COMPLEX)
+endif()
 
 if(CMAKE_COMPILER_IS_GNUCXX)
     add_definitions(-std=c++14)

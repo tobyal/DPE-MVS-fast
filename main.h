@@ -30,6 +30,8 @@
 #include <cstdarg>
 #include <random>
 #include <unordered_map>
+#include <set>
+#include <stdexcept>
 // Includes Boost filesystem
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
@@ -114,7 +116,7 @@ struct Problem {
 	path result_folder;
 	int scale_size = 1;
 	PatchMatchParams params;
-	bool show_medium_result = true;
+	bool show_medium_result = false;
 	int iteration;
 };
 
