@@ -1,0 +1,36 @@
+root = "/mnt/sda/ubuntu/lkx/mvs/MVS_EXP"
+MVS_EXP/
+├── datasets/
+│   └── ETH3D/
+│       ├── raw/
+│       │   ├── train/       # 13 个场景，已完整复制
+│       │   └── test/        # 原目录为空，当前保留空目录
+│       ├── processed/
+│       │   ├── courtyard/
+│       │   │   ├── scale_1/ # 暂为空
+│       │   │   ├── scale_2/ # images、cams、pair.txt
+│       │   │   └── scale_4/ # 暂为空
+│       │   ├── pipes/
+│       │   └── ...          # 共 13 个场景
+│       └── gt/
+│           ├── courtyard/
+│           ├── pipes/
+│           └── ...          # 暂为空，等待 GT 数据
+├── results/
+│   ├── DPE-MVS/
+│   ├── DPE-MVS-fast/
+│   │   └── pipes/
+│   │       └── half_fast_v1/
+│   │           ├── DPE.ply
+│   │           ├── views/
+│   │           ├── runtime.txt
+│   │           ├── config.txt
+│   │           └── run.log
+│   ├── SD-MVS/
+│   └── Ours/
+└── evaluations/
+    └── ETH3D/
+        ├── DPE-MVS/
+        ├── DPE-MVS-fast/
+        ├── SD-MVS/
+        └── Ours/
