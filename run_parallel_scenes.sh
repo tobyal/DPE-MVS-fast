@@ -9,6 +9,7 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BINARY="$PROJECT_DIR/build/DPE"
 SCALE="scale_2"
 EXPERIMENT=""
+EXPERIMENT_AUTO=0
 GPU_CSV="0"
 WORKERS_PER_GPU=1
 VIS="none"
@@ -23,10 +24,8 @@ usage() {
 用法：
   ./run_parallel_scenes.sh [选项] scene1 scene2 ...
 
-必填：
-  --experiment NAME       每个场景共用的实验名称，例如 half_fast_v3
-
 常用选项：
+  --experiment NAME       实验名称；省略时自动使用 YYYYMMDD_HHMMSS 时间戳
   --scale SCALE           scale_1、scale_2 或 scale_4；默认 scale_2
   --gpus LIST             GPU 编号，逗号分隔；默认 0，例如 0,1,2,3
   --workers-per-gpu N     每张 GPU 的并发进程数；默认 1
@@ -101,9 +100,14 @@ done
 [[ "$WORKERS_PER_GPU" =~ ^[1-9][0-9]*$ ]] || {
     echo "错误：--workers-per-gpu 必须是正整数。" >&2; exit 2;
 }
-[[ -n "$EXPERIMENT" ]] || { echo "错误：必须指定 --experiment。" >&2; exit 2; }
 [[ ${#SCENES[@]} -gt 0 ]] || { echo "错误：至少指定一个场景。" >&2; exit 2; }
 [[ -x "$BINARY" ]] || { echo "错误：找不到可执行程序：$BINARY" >&2; exit 2; }
+
+# 整批任务只生成一次时间戳，保证所有场景进入同名实验目录。
+if [[ -z "$EXPERIMENT" ]]; then
+    EXPERIMENT="$(date +%Y%m%d_%H%M%S)"
+    EXPERIMENT_AUTO=1
+fi
 
 IFS=',' read -r -a GPU_IDS <<< "$GPU_CSV"
 [[ ${#GPU_IDS[@]} -gt 0 ]] || { echo "错误：GPU 列表为空。" >&2; exit 2; }
@@ -140,6 +144,11 @@ echo "项目：$PROJECT_DIR"
 echo "实验根目录：$EXP_ROOT"
 echo "尺度：$SCALE"
 echo "实验名：$EXPERIMENT"
+if [[ $EXPERIMENT_AUTO -eq 1 ]]; then
+    echo "实验名来源：自动时间戳"
+else
+    echo "实验名来源：命令行指定"
+fi
 echo "GPU：$GPU_CSV"
 echo "每张 GPU worker 数：$WORKERS_PER_GPU"
 echo "总 worker 数：${#GPU_SLOTS[@]}"

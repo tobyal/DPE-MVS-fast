@@ -84,22 +84,45 @@ cmake --build build -j 16
 
 ## 4. pipes 常规运行：不生成中间 JPG
 
-输入为 `pipes/scale_2`，结果保存为 `half_fast_v2`：
+常规单场景运行同样支持可选实验名。下面的 `EXPERIMENT_NAME` 是可选变量：未设置时自动使用当前时间戳；如果需要手动命名，先执行 `EXPERIMENT_NAME=half_fast_v3` 再运行其余命令即可。
+
+输入为 `pipes/scale_2`：
 
 ```bash
 cd /mnt/sda/ubuntu/lkx/mvs/DPE-MVS-fast
 set -o pipefail
 
-mkdir -p /mnt/sda/ubuntu/lkx/mvs/MVS_EXP/results/DPE-MVS-fast/pipes/half_fast_v2
+EXPERIMENT="${EXPERIMENT_NAME:-$(date +%Y%m%d_%H%M%S)}"
+OUTPUT_DIR="/mnt/sda/ubuntu/lkx/mvs/MVS_EXP/results/DPE-MVS-fast/pipes/${EXPERIMENT}"
+mkdir -p "$OUTPUT_DIR"
+echo "实验名：$EXPERIMENT"
 
 ./build/DPE \
   /mnt/sda/ubuntu/lkx/mvs/MVS_EXP/datasets/ETH3D/processed/pipes/scale_2 \
   0 \
-  --output=/mnt/sda/ubuntu/lkx/mvs/MVS_EXP/results/DPE-MVS-fast/pipes/half_fast_v2 \
+  --output="$OUTPUT_DIR" \
   --vis=none \
   --checkpoint=final \
   --profile=on \
-  2>&1 | tee /mnt/sda/ubuntu/lkx/mvs/MVS_EXP/results/DPE-MVS-fast/pipes/half_fast_v2/run.log
+  2>&1 | tee "$OUTPUT_DIR/run.log"
+```
+
+默认自动命名的输出示例为：
+
+```text
+/mnt/sda/ubuntu/lkx/mvs/MVS_EXP/results/DPE-MVS-fast/pipes/20260915_091530/
+```
+
+如果希望显式使用 `half_fast_v3`，在同一个终端中先运行：
+
+```bash
+EXPERIMENT_NAME=half_fast_v3
+```
+
+之后如需恢复自动时间戳命名，执行：
+
+```bash
+unset EXPERIMENT_NAME
 ```
 
 参数含义：
@@ -113,22 +136,25 @@ mkdir -p /mnt/sda/ubuntu/lkx/mvs/MVS_EXP/results/DPE-MVS-fast/pipes/half_fast_v2
 
 ## 5. pipes 运行：生成所有中间图像
 
-中间图像分析应使用一个新的实验名，避免复用已有边缘缓存。以下示例使用 `half_fast_v2_vis`：
+中间图像分析应使用一个新的实验名，避免复用已有边缘缓存。以下命令未指定名称时自动使用时间戳；也可以先设置 `EXPERIMENT_NAME=half_fast_v3_vis`：
 
 ```bash
 cd /mnt/sda/ubuntu/lkx/mvs/DPE-MVS-fast
 set -o pipefail
 
-mkdir -p /mnt/sda/ubuntu/lkx/mvs/MVS_EXP/results/DPE-MVS-fast/pipes/half_fast_v2_vis
+EXPERIMENT="${EXPERIMENT_NAME:-$(date +%Y%m%d_%H%M%S)}"
+OUTPUT_DIR="/mnt/sda/ubuntu/lkx/mvs/MVS_EXP/results/DPE-MVS-fast/pipes/${EXPERIMENT}"
+mkdir -p "$OUTPUT_DIR"
+echo "实验名：$EXPERIMENT"
 
 ./build/DPE \
   /mnt/sda/ubuntu/lkx/mvs/MVS_EXP/datasets/ETH3D/processed/pipes/scale_2 \
   0 \
-  --output=/mnt/sda/ubuntu/lkx/mvs/MVS_EXP/results/DPE-MVS-fast/pipes/half_fast_v2_vis \
+  --output="$OUTPUT_DIR" \
   --vis=all \
   --checkpoint=final \
   --profile=on \
-  2>&1 | tee /mnt/sda/ubuntu/lkx/mvs/MVS_EXP/results/DPE-MVS-fast/pipes/half_fast_v2_vis/run.log
+  2>&1 | tee "$OUTPUT_DIR/run.log"
 ```
 
 `--vis=all` 为每个视图、每个尺度和每轮处理生成：
@@ -156,16 +182,19 @@ views/00000000/connect_<scale>.jpg
 cd /mnt/sda/ubuntu/lkx/mvs/DPE-MVS-fast
 set -o pipefail
 
-mkdir -p /mnt/sda/ubuntu/lkx/mvs/MVS_EXP/results/DPE-MVS-fast/pipes/half_fast_v2_final_vis
+EXPERIMENT="${EXPERIMENT_NAME:-$(date +%Y%m%d_%H%M%S)}"
+OUTPUT_DIR="/mnt/sda/ubuntu/lkx/mvs/MVS_EXP/results/DPE-MVS-fast/pipes/${EXPERIMENT}"
+mkdir -p "$OUTPUT_DIR"
+echo "实验名：$EXPERIMENT"
 
 ./build/DPE \
   /mnt/sda/ubuntu/lkx/mvs/MVS_EXP/datasets/ETH3D/processed/pipes/scale_2 \
   0 \
-  --output=/mnt/sda/ubuntu/lkx/mvs/MVS_EXP/results/DPE-MVS-fast/pipes/half_fast_v2_final_vis \
+  --output="$OUTPUT_DIR" \
   --vis=final \
   --checkpoint=final \
   --profile=on \
-  2>&1 | tee /mnt/sda/ubuntu/lkx/mvs/MVS_EXP/results/DPE-MVS-fast/pipes/half_fast_v2_final_vis/run.log
+  2>&1 | tee "$OUTPUT_DIR/run.log"
 ```
 
 `--vis=final` 会为每个视图保存最终的 depth、normal、weak JPG，但不会生成每个尺度的 `rawedge/connect` JPG。
@@ -198,19 +227,24 @@ mkdir -p /mnt/sda/ubuntu/lkx/mvs/MVS_EXP/results/DPE-MVS-fast/pipes/half_fast_v2
 
 ## 8. 其他场景和尺度
 
-运行其他场景时，同时修改输入路径、输出路径中的场景名和实验名。例如运行 `courtyard/scale_2`：
+运行其他场景时只需修改 `SCENE` 和 `SCALE`。实验名仍然可选，未设置时自动使用时间戳。例如运行 `courtyard/scale_2`：
 
 ```bash
-mkdir -p /mnt/sda/ubuntu/lkx/mvs/MVS_EXP/results/DPE-MVS-fast/courtyard/half_fast_v1
+SCENE=courtyard
+SCALE=scale_2
+EXPERIMENT="${EXPERIMENT_NAME:-$(date +%Y%m%d_%H%M%S)}"
+OUTPUT_DIR="/mnt/sda/ubuntu/lkx/mvs/MVS_EXP/results/DPE-MVS-fast/${SCENE}/${EXPERIMENT}"
+mkdir -p "$OUTPUT_DIR"
+echo "实验名：$EXPERIMENT"
 
 ./build/DPE \
-  /mnt/sda/ubuntu/lkx/mvs/MVS_EXP/datasets/ETH3D/processed/courtyard/scale_2 \
+  "/mnt/sda/ubuntu/lkx/mvs/MVS_EXP/datasets/ETH3D/processed/${SCENE}/${SCALE}" \
   0 \
-  --output=/mnt/sda/ubuntu/lkx/mvs/MVS_EXP/results/DPE-MVS-fast/courtyard/half_fast_v1 \
+  --output="$OUTPUT_DIR" \
   --vis=none \
   --checkpoint=final \
   --profile=on \
-  2>&1 | tee /mnt/sda/ubuntu/lkx/mvs/MVS_EXP/results/DPE-MVS-fast/courtyard/half_fast_v1/run.log
+  2>&1 | tee "$OUTPUT_DIR/run.log"
 ```
 
 建议实验命名：
@@ -231,6 +265,33 @@ mkdir -p /mnt/sda/ubuntu/lkx/mvs/MVS_EXP/results/DPE-MVS-fast/courtyard/half_fas
 /mnt/sda/ubuntu/lkx/mvs/DPE-MVS-fast/run_parallel_scenes.sh
 ```
 
+`--experiment` 是可选参数。未指定时，脚本会在整批任务启动时生成一次时间戳，格式为 `YYYYMMDD_HHMMSS`；所有场景使用同一个时间戳实验名。例如：
+
+```bash
+cd /mnt/sda/ubuntu/lkx/mvs/DPE-MVS-fast
+
+./run_parallel_scenes.sh \
+  --scale scale_2 \
+  --gpus 0,1,2,3 \
+  --vis none \
+  courtyard delivery_area electro facade
+```
+
+假设启动时间为 2026-09-15 09:30:45，则输出目录为：
+
+```text
+MVS_EXP/results/DPE-MVS-fast/courtyard/20260915_093045/
+MVS_EXP/results/DPE-MVS-fast/delivery_area/20260915_093045/
+MVS_EXP/results/DPE-MVS-fast/electro/20260915_093045/
+MVS_EXP/results/DPE-MVS-fast/facade/20260915_093045/
+```
+
+需要固定实验名称时仍可显式指定：
+
+```text
+--experiment half_fast_v3
+```
+
 使用 4 张 GPU 并行运行多个 `scale_2` 场景：
 
 ```bash
@@ -244,20 +305,6 @@ cd /mnt/sda/ubuntu/lkx/mvs/DPE-MVS-fast
   --checkpoint final \
   --profile on \
   pipes courtyard office facade kicker meadow
-```
-
-```bash
-cd /mnt/sda/ubuntu/lkx/mvs/DPE-MVS-fast
-
-./run_parallel_scenes.sh \
-  --scale scale_2 \
-  --experiment half_fast_v3 \
-  --gpus 0,1,2,3 \
-  --vis final \
-  --checkpoint final \
-  --profile on \
-  courtyard delivery_area electro facade kicker meadow office pipes \
-  playground relief relief_2 terrace terrains
 ```
 
 上述命令会建立 4 个 worker：
@@ -290,7 +337,7 @@ MVS_EXP/results/DPE-MVS-fast/<scene>/half_fast_v3/
   pipes courtyard office facade
 ```
 
-默认不允许写入非空实验目录。如果确认需要续写或覆盖同名文件，必须显式增加：
+无论实验名是手动指定还是自动生成，默认都不允许写入非空实验目录。如果确认需要续写或覆盖同名文件，必须显式增加：
 
 ```text
 --allow-existing
@@ -322,7 +369,95 @@ MVS_EXP/results/DPE-MVS-fast/<scene>/half_fast_v3/
 ./run_parallel_scenes.sh --help
 ```
 
-## 10. 从 ETH3D raw 转换输入：旧文档内容合并说明
+## 10. 使用 ETH3D 官方工具批量评估
+
+评估脚本位于：
+
+```text
+/mnt/sda/ubuntu/lkx/mvs/DPE-MVS-fast/evaluate_mvs.sh
+```
+
+它调用以下官方程序，不修改官方评估代码：
+
+```text
+/mnt/sda/ubuntu/lkx/mvs/multi-view-evaluation/build/ETH3DMultiViewEvaluation
+```
+
+`--methods`、`--scenes` 和 `--experiments` 都支持用逗号提供多个名称。脚本会评估三组参数的全部笛卡尔组合。例如，下面的命令会产生 `2 × 2 × 2 = 8` 个评估：
+
+```bash
+cd /mnt/sda/ubuntu/lkx/mvs/DPE-MVS-fast
+
+./evaluate_mvs.sh \
+  --methods DPE-MVS,DPE-MVS-fast \
+  --scenes pipes,courtyard \
+  --experiments half_fast_v3,full_fast_v1
+```
+
+当前两个方法、13 个 ETH3D 场景和 `half_fast_v3` 的完整评估命令如下。它会依次生成 `2 × 13 × 1 = 26` 个评估组合：
+
+```bash
+cd /mnt/sda/ubuntu/lkx/mvs/DPE-MVS-fast
+
+./evaluate_mvs.sh \
+  --methods DPE-MVS,DPE-MVS-fast \
+  --scenes courtyard,delivery_area,electro,facade,kicker,meadow,office,pipes,playground,relief,relief_2,terrace,terrains \
+  --experiments half_fast_v3
+```
+
+单个组合的重建点云从以下位置读取：
+
+```text
+MVS_EXP/results/<method>/<scene>/<experiment>/DPE.ply
+```
+
+GT 自动从以下位置读取：
+
+```text
+MVS_EXP/datasets/ETH3D/gt/<scene>/<scene>/dslr_scan_eval/scan_alignment.mlp
+```
+
+每个组合按 `<method>__<scene>__<experiment>` 命名，输出到：
+
+```text
+MVS_EXP/evaluations/tmp/
+├── summary.tsv
+└── DPE-MVS-fast__pipes__half_fast_v3/
+    ├── config.txt
+    ├── evaluation.log
+    ├── metrics.tsv
+    ├── accuracy/
+    │   └── accuracy.tolerance_<tolerance>.ply
+    └── completeness/
+        └── completeness.tolerance_<tolerance>.ply
+```
+
+其中：
+
+- `evaluation.log` 保存官方工具的完整原始输出；
+- `metrics.tsv` 保存该组合每个 tolerance 的 completeness、accuracy 和 F1；
+- `summary.tsv` 是所有批次共享的总表，每完成一个组合就追加对应指标和评估时间；
+- 默认 tolerance 为 `0.01,0.02,0.05,0.1`，可用 `--tolerances` 修改；
+- 默认拒绝写入已有的非空组合目录，确认重新评估时使用 `--allow-existing`；
+- `--dry-run` 只检查所有输入路径并显示组合，不启动评估。
+
+建议正式评估前先检查：
+
+```bash
+./evaluate_mvs.sh \
+  --methods DPE-MVS,DPE-MVS-fast \
+  --scenes pipes,courtyard \
+  --experiments half_fast_v3 \
+  --dry-run
+```
+
+查看完整参数：
+
+```bash
+./evaluate_mvs.sh --help
+```
+
+## 11. 从 ETH3D raw 转换输入：旧文档内容合并说明
 
 原 `RUN_PIPE_DPE.md` 记录了通过 `colmap2mvsnet_acm.py` 将 ETH3D 原始数据转换成 DPE 输入格式的流程。当前对应关系已经调整为：
 
@@ -354,7 +489,7 @@ dslr_calibration_undistorted/
 
 旧文档中的 `rm -rf` 转换命令没有合并到新手册，以避免误删已有数据。
 
-## 11. 如何判断运行是否成功
+## 12. 如何判断运行是否成功
 
 正常结束时日志应包含：
 
